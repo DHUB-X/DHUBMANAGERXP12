@@ -1,73 +1,44 @@
 <template>
-  <div class="flex items-center gap-4">
-    <!-- Chart -->
-    <div class="relative shrink-0" :style="{ width: size + 'px', height: size + 'px' }">
-      <svg :width="size" :height="size" :viewBox="`0 0 ${size} ${size}`" class="rotate-[-90deg]">
-        <!-- Background circle -->
-        <circle
-          :cx="center"
-          :cy="center"
-          :r="radius"
-          fill="none"
-          :stroke="isDark ? '#1f2937' : '#f1f5f9'"
-          :stroke-width="strokeWidth"
-        />
-        <!-- Segments -->
-        <circle
-          v-for="(seg, i) in segments"
-          :key="i"
-          :cx="center"
-          :cy="center"
-          :r="radius"
-          fill="none"
-          :stroke="seg.color"
-          :stroke-width="strokeWidth"
-          :stroke-dasharray="`${seg.length} ${circumference - seg.length}`"
-          :stroke-dashoffset="-(seg.offset || 0)"
-          stroke-linecap="round"
-          class="transition-all duration-700 ease-out"
-          @mouseenter="hovered = i"
-          @mouseleave="hovered = -1"
-        />
-      </svg>
-      <!-- Center text -->
-      <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-        <span
-          class="font-bold text-gray-900 dark:text-white leading-tight"
-          :class="size < 150 ? 'text-sm' : 'text-lg'"
-        >
-          {{ hovered >= 0 ? formatSize(categories[hovered].bytes) : formatSize(totalBytes) }}
-        </span>
-        <span class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-tighter">
-          {{ hovered >= 0 ? categories[hovered].name : $t('diskUsage.total') }}
-        </span>
-      </div>
-    </div>
-
-    <!-- Legend (Always visible in this version) -->
-    <div class="flex-1 min-w-0 space-y-1.5">
-      <div
-        v-for="(cat, i) in categories.slice(0, 5)"
+  <div class="relative shrink-0 flex items-center justify-center" :style="{ width: size + 'px', height: size + 'px' }">
+    <svg :width="size" :height="size" :viewBox="`0 0 ${size} ${size}`" class="rotate-[-90deg]">
+      <!-- Background circle -->
+      <circle
+        :cx="center"
+        :cy="center"
+        :r="radius"
+        fill="none"
+        :stroke="isDark ? '#1e293b' : '#f1f5f9'"
+        :stroke-width="strokeWidth"
+      />
+      <!-- Segments -->
+      <circle
+        v-for="(seg, i) in segments"
         :key="i"
-        class="flex items-center justify-between text-[10px] group cursor-default"
+        :cx="center"
+        :cy="center"
+        :r="radius"
+        fill="none"
+        :stroke="seg.color"
+        :stroke-width="strokeWidth"
+        :stroke-dasharray="`${seg.length} ${circumference - seg.length}`"
+        :stroke-dashoffset="-(seg.offset || 0)"
+        stroke-linecap="round"
+        class="transition-all duration-500 ease-out cursor-pointer hover:opacity-80"
         @mouseenter="hovered = i"
         @mouseleave="hovered = -1"
+      />
+    </svg>
+    <!-- Center text -->
+    <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none text-center px-2">
+      <span
+        class="font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight transition-all duration-200"
+        :class="size < 160 ? 'text-base' : 'text-xl'"
       >
-        <div class="flex items-center gap-1.5 min-w-0">
-          <div
-            class="w-1.5 h-1.5 rounded-full shrink-0"
-            :style="{ backgroundColor: cat.color }"
-          ></div>
-          <span
-            class="truncate text-gray-600 dark:text-gray-400 font-medium group-hover:text-blue-500 transition-colors"
-          >
-            {{ cat.name }}
-          </span>
-        </div>
-        <span class="text-gray-400 dark:text-gray-500 tabular-nums">
-          {{ ((cat.bytes / totalBytes) * 100).toFixed(1) }}%
-        </span>
-      </div>
+        {{ hovered >= 0 ? formatSize(categories[hovered].bytes) : formatSize(totalBytes) }}
+      </span>
+      <span class="text-[10px] font-semibold text-slate-400 dark:text-slate-400 uppercase tracking-wider mt-0.5">
+        {{ hovered >= 0 ? categories[hovered].name : $t('diskUsage.total') }}
+      </span>
     </div>
   </div>
 </template>
