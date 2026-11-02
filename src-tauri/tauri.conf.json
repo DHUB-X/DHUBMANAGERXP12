@@ -1,6 +1,6 @@
 {
   "productName": "DHUB Manager XP12",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "identifier": "com.dhubmanager.xp12",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -42,7 +42,8 @@
       "deb",
       "rpm",
       "appimage",
-      "msi"
+      "msi",
+      "nsis"
     ],
     "icon": [
       "icons/32x32.png",
@@ -88,7 +89,7 @@
       ]
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQjM3QUQzQTc5MDVCNEYKUldSUFc1Q24wM3F6Z3FFS3Exdk9QUzZmV0V4aWNkSTVCODZwY2lJQnExbnBWSW9ScExzQzlNRE0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJEREQ0ODhGMzhFOURFOTQKUldTVTN1azRqMGpkdlNteFJQK0JZa20yTGFSQ3d1S0QvZUpZS0dGVVNveG13ZnBkZjJGYm5DTDMK",
       "endpoints": [
         "https://github.com/DHUB-X/DHUBMANAGERXP12/releases/latest/download/latest.json"
       ]

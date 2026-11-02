@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-03
+
+### Added
+
+- **Modernized Disk Space Analysis Dashboard** - Interactive donut distribution chart with detailed category metrics and real-time progress bars.
+- **In-App Update Controls** - Added manual "Check for Updates" button and auto-update configuration switches in Settings.
+- **Dual Windows Installers** - Added NSIS executable setup alongside MSI installer to prevent shortcut creation warnings.
+
+### Fixed
+
+- **Update Check Status** - Improved update checker error handling to gracefully report up-to-date status.
+- **Release Automation Repository** - Updated release workflow repository endpoints to DHUB-X/DHUBMANAGERXP12.
+
+## [1.3.0] - 2026-11-02
+
+### Added
+
+- **Modernized Disk Space Analysis** - Redesigned disk usage interface with category breakdown and progress visualization.
+- **Update Checker Settings** - Added dedicated updates section in settings.
+
 ## [1.2.5] - 2026-05-31
 
 ### Added

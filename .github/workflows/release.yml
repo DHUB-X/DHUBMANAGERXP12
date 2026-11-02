@@ -145,7 +145,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+          sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 
       - name: Add macOS targets
         if: matrix.platform == 'macos-latest'
@@ -177,7 +177,7 @@ jobs:
         run: |
           echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> $GITHUB_ENV
-          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> $GITHUB_ENV
           echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=3" >> $GITHUB_ENV
           echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> $GITHUB_ENV
           echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> $GITHUB_ENV
@@ -188,9 +188,11 @@ jobs:
         shell: bash
         env:
           XFAST_ZIBO_GOOGLE_DRIVE_API_KEY: ${{ secrets.XFAST_ZIBO_GOOGLE_DRIVE_API_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SECRET_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SECRET_SIGNING_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          export TAURI_SIGNING_PRIVATE_KEY="${SECRET_SIGNING_KEY:-dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5WDhxQ3F1VUlLSG9HVEgzbUdGdVFtRG9Mb3JSOE5lZHdTemFPUWtuQXA3OEFBQkFBQUFBQUFBQUFBQUlBQUFBQWEvcHVCUkQxOVhyYnRrdGkrSHpGT2RnamVEQmk3VDd5ZkdxdzZyVU1tTHowZXVDY040QzZJTDBDazZFaHB1SEI4U1JTUWVZWnByelNMS0h0NFFvQXNVaTRkSERyakNpc211eHhjd3BHM01yOVp3eEVuc2JtSW5TbGNqTG9pY1pkUTVhR0ZOZjlIS2M9Cg==}"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${SECRET_SIGNING_KEY_PASSWORD:-dhubmanager2026}"
           echo "🔨 Building DHUB-Manager ${{ needs.prepare-release.outputs.version }} for ${{ matrix.suffix }}..."
           if [ -n "${{ matrix.args }}" ]; then
             npm run tauri:build -- ${{ matrix.args }}
@@ -217,6 +219,16 @@ jobs:
             echo "✅ MSI installer prepared: $msiName"
           } else {
             echo "⚠️ No MSI installer found"
+          }
+
+          # NSIS installer
+          $nsisFile = Get-ChildItem -Path "target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($nsisFile) {
+            $nsisName = "DHUB-Manager-$version-windows-setup.exe"
+            Copy-Item -Path $nsisFile.FullName -Destination "target/release/$nsisName" -Force
+            echo "✅ NSIS installer prepared: $nsisName"
+          } else {
+            echo "⚠️ No NSIS installer found"
           }
 
       - name: Prepare macOS artifact
@@ -261,6 +273,7 @@ jobs:
           name: release-${{ matrix.suffix }}
           path: |
             target/release/DHUB-Manager-*-windows-portable.exe
+            target/release/DHUB-Manager-*-windows-setup.exe
             target/release/bundle/msi/DHUB-Manager-*-windows-setup.msi
             target/release/bundle/msi/*.msi.sig
             target/universal-apple-darwin/release/bundle/dmg/DHUB-Manager-*-macos-universal.dmg
@@ -458,7 +471,7 @@ jobs:
         run: |
           version="${{ needs.prepare-release.outputs.version }}"
           tag="${{ needs.prepare-release.outputs.tag }}"
-          repo="CCA3370/DHUB-Manager"
+          repo="${{ github.repository }}"
           base_url="https://github.com/${repo}/releases/download/${tag}"
 
           # Read signature files
@@ -582,13 +595,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-release.outputs.tag }}
-          name: DHUB-Manager ${{ needs.prepare-release.outputs.tag }}
+          name: DHUB Manager XP12 ${{ needs.prepare-release.outputs.tag }}
           body_path: release-files/release-notes.md
           draft: false
           prerelease: ${{ needs.prepare-release.outputs.is_prerelease == 'true' }}
           files: |
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-portable.zip
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-setup.zip
+            release-files/*.exe
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-macos-universal.zip
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-AppImage.zip
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-arch-x64.tar.gz
