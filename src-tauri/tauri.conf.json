@@ -1,6 +1,6 @@
 {
   "productName": "DHUB Manager XP12",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "identifier": "com.dhubmanager.xp12",
   "build": {
     "beforeDevCommand": "npm run dev",

@@ -2116,51 +2116,112 @@
               </p>
             </div>
           </div>
-          <svg
-            class="w-5 h-5 text-gray-400 transition-transform duration-200"
-            :class="{ 'rotate-180': aboutExpanded }"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M19 9l-7 7-7-7"
-            ></path>
-          </svg>
+
+          <div class="flex items-center gap-2.5">
+            <!-- Manual Check for Updates Button -->
+            <button
+              class="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-xs shadow-blue-500/20 active:scale-95 transition-all flex items-center gap-1.5 disabled:opacity-50"
+              :disabled="updateStore.checkInProgress"
+              :title="$t('update.checkForUpdates')"
+              @click.stop="handleCheckUpdate"
+            >
+              <div
+                v-if="updateStore.checkInProgress"
+                class="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"
+              ></div>
+              <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>{{ updateStore.checkInProgress ? $t('scenery.checkingUpdates') : $t('update.checkForUpdates') }}</span>
+            </button>
+
+            <!-- Changelog Button -->
+            <button
+              class="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-gray-700/50 text-gray-700 dark:text-gray-300 transition-colors"
+              title="Changelog"
+              @click.stop="handleViewCurrentVersionChangelog"
+            >
+              Changelog
+            </button>
+
+            <svg
+              class="w-5 h-5 text-gray-400 transition-transform duration-200 ml-1"
+              :class="{ 'rotate-180': aboutExpanded }"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
         </div>
 
-        <!-- Contributors section -->
+        <!-- Expanded section with Auto-Update options & Contributors -->
         <transition name="collapse">
           <div
             v-if="aboutExpanded"
-            class="px-4 pb-4 border-t border-gray-100 dark:border-gray-700/50"
+            class="px-4 pb-4 border-t border-gray-100 dark:border-gray-700/50 space-y-4"
           >
-            <div class="pt-4 space-y-3">
-              <!-- Organization / Developer -->
-              <div>
-                <h4
-                  class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2"
-                >
-                  {{ $t('settings.development') }}
-                </h4>
-                <div class="flex flex-wrap gap-2">
-                  <span
-                    class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium bg-sky-100 dark:bg-sky-500/20 text-sky-700 dark:text-sky-400"
-                  >
-                    <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                      />
-                    </svg>
-                    DHUB Aviation
-                  </span>
+            <!-- Update Options -->
+            <div class="pt-4 border-b border-gray-100 dark:border-gray-700/40 pb-4 space-y-3">
+              <h4 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                {{ $t('update.autoUpdateCheck') }}
+              </h4>
+
+              <!-- Auto-check toggle -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium text-gray-800 dark:text-gray-200">
+                    {{ $t('update.autoUpdateCheck') }}
+                  </p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    {{ $t('update.autoUpdateCheckDesc') }}
+                  </p>
                 </div>
+                <ToggleSwitch
+                  :model-value="updateStore.autoCheckEnabled"
+                  @update:model-value="updateStore.toggleAutoCheck()"
+                />
+              </div>
+
+              <!-- Pre-release toggle -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium text-gray-800 dark:text-gray-200">
+                    Pre-Release & Beta Updates
+                  </p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    Sertakan versi pra-rilis atau pengujian
+                  </p>
+                </div>
+                <ToggleSwitch
+                  :model-value="updateStore.includePreRelease"
+                  @update:model-value="updateStore.toggleIncludePreRelease()"
+                />
+              </div>
+            </div>
+
+            <!-- Organization / Developer -->
+            <div>
+              <h4
+                class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2"
+              >
+                {{ $t('settings.development') }}
+              </h4>
+              <div class="flex flex-wrap gap-2">
+                <span
+                  class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium bg-sky-100 dark:bg-sky-500/20 text-sky-700 dark:text-sky-400"
+                >
+                  <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+                    />
+                  </svg>
+                  DHUB Aviation
+                </span>
               </div>
             </div>
           </div>
