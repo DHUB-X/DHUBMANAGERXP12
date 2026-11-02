@@ -104,7 +104,16 @@ export const useUpdateStore = defineStore('update', () => {
       const message = error instanceof Error ? error.message : String(error)
       logError(`Update check failed: ${message}`, 'update')
       if (manual) {
-        toast.error(t('update.checkFailed'))
+        if (
+          message.includes('Could not fetch a valid release JSON') ||
+          message.includes('404') ||
+          message.includes('release JSON')
+        ) {
+          logBasic('No newer release found on remote, app is up to date', 'update')
+          toast.success(t('update.upToDate'))
+        } else {
+          toast.error(t('update.checkFailed'))
+        }
       }
     } finally {
       checkInProgress.value = false
