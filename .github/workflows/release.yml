@@ -1,0 +1,629 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 3
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      tag: ${{ steps.get-version.outputs.tag }}
+      changelog: ${{ steps.extract-changelog.outputs.changelog }}
+      is_prerelease: ${{ steps.check-prerelease.outputs.is_prerelease }}
+      should_release: ${{ steps.check-tag.outputs.skip != 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Validate version consistency
+        run: node scripts/validate-version-consistency.mjs
+
+      - name: Get version from tauri.conf.json
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+          echo "🏷️  Tag: v$VERSION"
+
+      - name: Check if pre-release
+        id: check-prerelease
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          BASE_VERSION="${VERSION%%+*}"
+          if [[ "$BASE_VERSION" == *-* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Pre-release detected from version suffix: $VERSION"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "✅ Stable release: $VERSION"
+          fi
+
+      - name: Check if tag exists
+        id: check-tag
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "⚠️ Tag v$VERSION already exists, skipping release."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Tag v$VERSION does not exist, proceeding..."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract changelog for this version
+        if: steps.check-tag.outputs.skip != 'true'
+        id: extract-changelog
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+
+          # Extract the changelog section for this version
+          CHANGELOG=$(awk -v ver="## [$VERSION]" '
+            index($0, ver) == 1 { found=1; print; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | head -c 65000)
+
+          if [ -z "$CHANGELOG" ] || [ "$(echo "$CHANGELOG" | tr -d '[:space:]')" = "" ]; then
+            echo "⚠️  No changelog found for version $VERSION"
+            echo "Please add a changelog entry for version $VERSION in CHANGELOG.md"
+            echo ""
+            echo "Expected format:"
+            echo "## [$VERSION] - YYYY-MM-DD"
+            echo ""
+            echo "### Added"
+            echo "- Feature descriptions here"
+            exit 1
+          else
+            echo "✅ Extracted changelog for version $VERSION"
+          fi
+
+          # Write to file to avoid issues with multiline in GitHub Actions
+          echo "$CHANGELOG" > /tmp/changelog.txt
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/changelog.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build (${{ matrix.suffix }})
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            args: ''
+            suffix: linux-x64
+            artifact_glob: 'target/release/bundle/appimage/*.AppImage'
+            artifact_suffix: linux-x64.AppImage
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+            suffix: macos-universal
+            artifact_glob: 'target/universal-apple-darwin/release/bundle/dmg/*.dmg'
+            artifact_suffix: macos-universal.dmg
+          - platform: windows-latest
+            args: ''
+            suffix: windows-x64
+            artifact_glob: 'target/release/dhub-manager.exe'
+            artifact_suffix: windows-portable.exe
+
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+
+      - name: Add macOS targets
+        if: matrix.platform == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v2-rust-release"
+          key: "release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}"
+          cache-all-crates: true
+
+      - name: Set production build environment
+        shell: bash
+        run: |
+          echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=3" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> $GITHUB_ENV
+          echo "BUILD_MODE=production" >> $GITHUB_ENV
+          echo "✅ Production build environment configured"
+
+      - name: Build Tauri
+        shell: bash
+        env:
+          XFAST_ZIBO_GOOGLE_DRIVE_API_KEY: ${{ secrets.XFAST_ZIBO_GOOGLE_DRIVE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          echo "🔨 Building DHUB-Manager ${{ needs.prepare-release.outputs.version }} for ${{ matrix.suffix }}..."
+          if [ -n "${{ matrix.args }}" ]; then
+            npm run tauri:build -- ${{ matrix.args }}
+          else
+            npm run tauri:build
+          fi
+
+      - name: Prepare Windows artifact
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare-release.outputs.version }}"
+
+          # Portable exe
+          $portableName = "DHUB-Manager-$version-windows-portable.exe"
+          Rename-Item -Path "target/release/dhub-manager.exe" -NewName $portableName -Force
+          echo "✅ Portable exe prepared: $portableName"
+
+          # MSI installer
+          $msiFile = Get-ChildItem -Path "target/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msiFile) {
+            $msiName = "DHUB-Manager-$version-windows-setup.msi"
+            Rename-Item -Path $msiFile.FullName -NewName $msiName -Force
+            echo "✅ MSI installer prepared: $msiName"
+          } else {
+            echo "⚠️ No MSI installer found"
+          }
+
+      - name: Prepare macOS artifact
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          version="${{ needs.prepare-release.outputs.version }}"
+          dmg_file=$(ls target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          new_name="DHUB-Manager-${version}-macos-universal.dmg"
+          mv "$dmg_file" "target/universal-apple-darwin/release/bundle/dmg/$new_name"
+
+      - name: Prepare Linux artifact
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          version="${{ needs.prepare-release.outputs.version }}"
+
+          # AppImage
+          appimage_file=$(ls target/release/bundle/appimage/*.AppImage 2>/dev/null || true)
+          if [ -n "$appimage_file" ]; then
+            mv "$appimage_file" "target/release/bundle/appimage/DHUB-Manager-${version}-linux-x64.AppImage"
+            echo "✅ AppImage prepared"
+          fi
+
+          # deb package
+          deb_file=$(ls target/release/bundle/deb/*.deb 2>/dev/null || true)
+          if [ -n "$deb_file" ]; then
+            mv "$deb_file" "target/release/bundle/deb/DHUB-Manager-${version}-linux-x64.deb"
+            echo "✅ deb package prepared"
+          fi
+
+          # rpm package
+          rpm_file=$(ls target/release/bundle/rpm/*.rpm 2>/dev/null || true)
+          if [ -n "$rpm_file" ]; then
+            mv "$rpm_file" "target/release/bundle/rpm/DHUB-Manager-${version}-linux-x64.rpm"
+            echo "✅ rpm package prepared"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.suffix }}
+          path: |
+            target/release/DHUB-Manager-*-windows-portable.exe
+            target/release/bundle/msi/DHUB-Manager-*-windows-setup.msi
+            target/release/bundle/msi/*.msi.sig
+            target/universal-apple-darwin/release/bundle/dmg/DHUB-Manager-*-macos-universal.dmg
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            target/release/bundle/appimage/DHUB-Manager-*-linux-x64.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+            target/release/bundle/deb/DHUB-Manager-*-linux-x64.deb
+            target/release/bundle/rpm/DHUB-Manager-*-linux-x64.rpm
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build-arch-linux:
+    name: Build (linux-arch-x64)
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+    runs-on: ubuntu-22.04
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Install Arch Linux dependencies
+        shell: bash
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            curl \
+            git \
+            openssl \
+            pkgconf \
+            gtk3 \
+            webkit2gtk-4.1 \
+            libappindicator-gtk3 \
+            librsvg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v2-rust-release-arch"
+          key: "release-archlinux-${{ hashFiles('**/Cargo.lock') }}"
+          cache-all-crates: true
+
+      - name: Set production build environment
+        shell: bash
+        run: |
+          echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=3" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> $GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> $GITHUB_ENV
+          echo "BUILD_MODE=production" >> $GITHUB_ENV
+          echo "✅ Production build environment configured"
+
+      - name: Build frontend
+        shell: bash
+        run: npm run build
+
+      - name: Build Arch Linux binary
+        shell: bash
+        env:
+          XFAST_ZIBO_GOOGLE_DRIVE_API_KEY: ${{ secrets.XFAST_ZIBO_GOOGLE_DRIVE_API_KEY }}
+        run: |
+          echo "🔨 Building native Arch Linux binary..."
+          cargo build --manifest-path src-tauri/Cargo.toml --release
+
+      - name: Package Arch Linux artifact
+        shell: bash
+        run: |
+          version="${{ needs.prepare-release.outputs.version }}"
+          mkdir -p artifacts
+          cp target/release/dhub-manager artifacts/DHUB-Manager
+          tar -C artifacts -czf "target/release/DHUB-Manager-${version}-linux-arch-x64.tar.gz" DHUB-Manager
+
+      - name: Upload Arch Linux artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-linux-arch-x64
+          path: 'target/release/DHUB-Manager-*-linux-arch-x64.tar.gz'
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: [prepare-release, build, build-arch-linux]
+    if: needs.prepare-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          echo "📦 Downloaded artifacts:"
+          find artifacts -type f -name "DHUB-Manager-*" | head -20
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p release-files
+          version="${{ needs.prepare-release.outputs.version }}"
+
+          # Find and copy all artifacts to release-files
+          find artifacts -type f -name "DHUB-Manager-*" -exec cp {} release-files/ \;
+
+          # Copy updater bundles and signatures to release-files
+          find artifacts -type f \( -name "*.msi.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" -o -name "*.AppImage.sig" \) -exec cp {} release-files/ \;
+
+          cd release-files
+
+          # Zip Windows portable exe
+          if [ -f "DHUB-Manager-${version}-windows-portable.exe" ]; then
+            zip "DHUB-Manager-${version}-windows-portable.zip" "DHUB-Manager-${version}-windows-portable.exe"
+            rm "DHUB-Manager-${version}-windows-portable.exe"
+          fi
+
+          # Zip Windows MSI installer
+          if [ -f "DHUB-Manager-${version}-windows-setup.msi" ]; then
+            zip "DHUB-Manager-${version}-windows-setup.zip" "DHUB-Manager-${version}-windows-setup.msi"
+          fi
+
+          # Zip macOS DMG
+          if [ -f "DHUB-Manager-${version}-macos-universal.dmg" ]; then
+            zip "DHUB-Manager-${version}-macos-universal.zip" "DHUB-Manager-${version}-macos-universal.dmg"
+            rm "DHUB-Manager-${version}-macos-universal.dmg"
+          fi
+
+          # Zip Linux AppImage
+          if [ -f "DHUB-Manager-${version}-linux-x64.AppImage" ]; then
+            zip "DHUB-Manager-${version}-linux-x64-AppImage.zip" "DHUB-Manager-${version}-linux-x64.AppImage"
+          fi
+
+          # Zip Linux deb
+          if [ -f "DHUB-Manager-${version}-linux-x64.deb" ]; then
+            zip "DHUB-Manager-${version}-linux-x64-deb.zip" "DHUB-Manager-${version}-linux-x64.deb"
+            rm "DHUB-Manager-${version}-linux-x64.deb"
+          fi
+
+          # Zip Linux rpm
+          if [ -f "DHUB-Manager-${version}-linux-x64.rpm" ]; then
+            zip "DHUB-Manager-${version}-linux-x64-rpm.zip" "DHUB-Manager-${version}-linux-x64.rpm"
+            rm "DHUB-Manager-${version}-linux-x64.rpm"
+          fi
+
+          # Generate checksums for published archives
+          find . -maxdepth 1 -type f \( -name "DHUB-Manager-*.zip" -o -name "DHUB-Manager-*.tar.gz" \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > checksums.txt
+
+          echo "✅ Release files prepared:"
+          ls -la
+          echo ""
+          echo "📋 Checksums:"
+          cat checksums.txt
+
+      - name: Generate latest.json for updater
+        shell: bash
+        env:
+          CHANGELOG_NOTES: ${{ needs.prepare-release.outputs.changelog }}
+        run: |
+          version="${{ needs.prepare-release.outputs.version }}"
+          tag="${{ needs.prepare-release.outputs.tag }}"
+          repo="CCA3370/DHUB-Manager"
+          base_url="https://github.com/${repo}/releases/download/${tag}"
+
+          # Read signature files
+          win_sig=""
+          mac_sig=""
+          linux_sig=""
+
+          win_sig_file=$(find release-files -name "*.msi.sig" | head -1)
+          if [ -n "$win_sig_file" ]; then
+            win_sig=$(cat "$win_sig_file")
+          fi
+
+          mac_sig_file=$(find release-files -name "*.app.tar.gz.sig" | head -1)
+          if [ -n "$mac_sig_file" ]; then
+            mac_sig=$(cat "$mac_sig_file")
+          fi
+
+          linux_sig_file=$(find release-files -name "*.AppImage.sig" | head -1)
+          if [ -n "$linux_sig_file" ]; then
+            linux_sig=$(cat "$linux_sig_file")
+          fi
+
+          # Find updater bundle filenames
+          win_bundle=$(find release-files -name "*.msi" -printf "%f\n" | head -1)
+          mac_bundle=$(find release-files -name "*.app.tar.gz" ! -name "*.sig" -printf "%f\n" | head -1)
+          linux_bundle=$(find release-files -name "*.AppImage" -printf "%f\n" | head -1)
+
+          # Build latest.json using jq
+          platforms='{}'
+
+          if [ -n "$win_bundle" ] && [ -n "$win_sig" ]; then
+            platforms=$(echo "$platforms" | jq --arg url "${base_url}/${win_bundle}" --arg sig "$win_sig" '. + {"windows-x86_64": {"signature": $sig, "url": $url}}')
+          fi
+
+          if [ -n "$mac_bundle" ] && [ -n "$mac_sig" ]; then
+            platforms=$(echo "$platforms" | jq --arg url "${base_url}/${mac_bundle}" --arg sig "$mac_sig" '. + {"darwin-universal": {"signature": $sig, "url": $url}}')
+          fi
+
+          if [ -n "$linux_bundle" ] && [ -n "$linux_sig" ]; then
+            platforms=$(echo "$platforms" | jq --arg url "${base_url}/${linux_bundle}" --arg sig "$linux_sig" '. + {"linux-x86_64": {"signature": $sig, "url": $url}}')
+          fi
+
+          pub_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          jq -n \
+            --arg version "$version" \
+            --arg notes "$CHANGELOG_NOTES" \
+            --arg pub_date "$pub_date" \
+            --argjson platforms "$platforms" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > release-files/latest.json
+
+          echo "✅ Generated latest.json:"
+          cat release-files/latest.json
+
+      - name: Generate release notes with download guide
+        shell: bash
+        env:
+          CHANGELOG_NOTES: ${{ needs.prepare-release.outputs.changelog }}
+        run: |
+          version="${{ needs.prepare-release.outputs.version }}"
+          tag="${{ needs.prepare-release.outputs.tag }}"
+          repo="${{ github.repository }}"
+          base_url="https://github.com/${repo}/releases/download/${tag}"
+
+          cat > release-files/download-guide.md <<'EOF'
+          ## Download
+
+          Choose the package for your system directly below. You do not need to search through the asset list at the bottom of
+          this page.
+
+          ### Windows
+
+          - **Recommended:**   [Windows Installer (.msi)](__BASE_URL__/DHUB-Manager-__VERSION__-windows-setup.msi)
+          - **Portable:**  [Windows Portable (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-windows-portable.zip)
+          - **If your browser blocks `.msi`:**  [Windows Installer ZIP](__BASE_URL__/DHUB-Manager-__VERSION__-windows-setup.zip)
+
+          ### macOS
+
+          - **Apple Silicon + Intel Mac:**  [macOS Universal (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-macos-universal.zip)
+
+          ### Linux
+
+          - **Most Linux distributions:**  [AppImage](__BASE_URL__/DHUB-Manager-__VERSION__-linux-x64.AppImage)
+          - **Debian / Ubuntu:**  [DEB package (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-linux-x64-deb.zip)
+          - **Fedora / openSUSE / RHEL:**  [RPM package (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-linux-x64-rpm.zip)
+          - **Arch Linux:**  [Arch package (.tar.gz)](__BASE_URL__/DHUB-Manager-__VERSION__-linux-arch-x64.tar.gz)
+
+          ### Notes
+
+          - Most users should download only one file for their operating system.
+          - `Source code`, `.sig`, `checksums.txt`, and `latest.json` are for developers, verification, or auto-update services. Normal users do not need them.
+
+          ---
+          EOF
+
+          sed -i \
+            -e "s#__BASE_URL__#${base_url}#g" \
+            -e "s#__VERSION__#${version}#g" \
+            release-files/download-guide.md
+
+          {
+            cat release-files/download-guide.md
+            printf '\n'
+            printf '%s\n' "$CHANGELOG_NOTES"
+          } > release-files/release-notes.md
+
+          echo "✅ Release notes preview:"
+          head -80 release-files/release-notes.md
+
+      - name: Create Git Tag
+        shell: bash
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag -a "${{ needs.prepare-release.outputs.tag }}" -m "Release ${{ needs.prepare-release.outputs.tag }}"
+          git push origin "${{ needs.prepare-release.outputs.tag }}"
+          echo "✅ Created and pushed tag: ${{ needs.prepare-release.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: DHUB-Manager ${{ needs.prepare-release.outputs.tag }}
+          body_path: release-files/release-notes.md
+          draft: false
+          prerelease: ${{ needs.prepare-release.outputs.is_prerelease == 'true' }}
+          files: |
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-portable.zip
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-setup.zip
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-macos-universal.zip
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-AppImage.zip
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-arch-x64.tar.gz
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-deb.zip
+            release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-rpm.zip
+            release-files/checksums.txt
+            release-files/latest.json
+            release-files/*.msi
+            release-files/*.msi.sig
+            release-files/*.app.tar.gz
+            release-files/*.app.tar.gz.sig
+            release-files/*.AppImage
+            release-files/*.AppImage.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        shell: bash
+        run: |
+          echo "🎉 Release ${{ needs.prepare-release.outputs.tag }} created successfully!"
+          echo "📦 Version: ${{ needs.prepare-release.outputs.version }}"
+          echo "🏷️  Tag: ${{ needs.prepare-release.outputs.tag }}"
+          if [ "${{ needs.prepare-release.outputs.is_prerelease }}" = "true" ]; then
+            echo "⚠️  Type: Pre-release"
+          else
+            echo "✅ Type: Stable release"
+          fi
+          echo ""
+          echo "📦 Artifacts included:"
+          echo "  - Windows (portable): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-portable.zip"
+          echo "  - Windows (installer): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-setup.zip"
+          echo "  - macOS:   DHUB-Manager-${{ needs.prepare-release.outputs.version }}-macos-universal.zip"
+          echo "  - Linux (AppImage): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-AppImage.zip"
+          echo "  - Linux (Arch): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-arch-x64.tar.gz"
+          echo "  - Linux (deb): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-deb.zip"
+          echo "  - Linux (rpm): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-rpm.zip"
+          echo ""
+          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.prepare-release.outputs.tag }}"

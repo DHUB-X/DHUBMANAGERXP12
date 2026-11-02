@@ -1,0 +1,145 @@
+@import 'tailwindcss';
+@variant dark (&:where(.dark, .dark *));
+
+@property --app-bg-from {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f8fafc;
+}
+
+@property --app-bg-via {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f8fafc;
+}
+
+@property --app-bg-to {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f8fafc;
+}
+
+.app-container {
+  --app-bg-from: #f0f7ff;
+  --app-bg-via: #e0f2fe;
+  --app-bg-to: #f8fafc;
+}
+
+.dark .app-container {
+  --app-bg-from: #0b1329;
+  --app-bg-via: #0f1d3a;
+  --app-bg-to: #070d1e;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family:
+    'Inter',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.app-container {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--app-bg-to);
+  background-image: 
+    radial-gradient(circle at 100% 0%, var(--app-bg-via) 0%, transparent 60%),
+    radial-gradient(circle at 0% 100%, var(--app-bg-from) 0%, transparent 50%),
+    radial-gradient(rgba(14, 165, 233, 0.045) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 28px 28px;
+}
+
+.dark .app-container {
+  background-image: 
+    radial-gradient(circle at 100% 0%, var(--app-bg-via) 0%, transparent 65%),
+    radial-gradient(circle at 0% 100%, var(--app-bg-from) 0%, transparent 55%),
+    radial-gradient(rgba(56, 189, 248, 0.035) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 28px 28px;
+}
+
+/* Modern Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.28);
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.25);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.45);
+}
+
+/* Base animations */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out forwards;
+}
+
+/* Global Vue transitions */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* Optimize list item rendering */
+[class*='entry-card'],
+.scenery-entry-card {
+  contain: layout style paint;
+  content-visibility: auto;
+}
+
+/* Optimize scenery groups */
+.scenery-group {
+  contain: layout style;
+}

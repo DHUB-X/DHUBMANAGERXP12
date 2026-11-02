@@ -1,0 +1,97 @@
+{
+  "productName": "DHUB Manager XP12",
+  "version": "1.2.5",
+  "identifier": "com.dhubmanager.xp12",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1431",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "DHUB Manager XP12",
+        "width": 960,
+        "height": 720,
+        "minWidth": 820,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "dragDropEnabled": true,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      },
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost https://asset.localhost https://*.tile.openstreetmap.org https://*.openstreetmap.org https://basemaps.cartocdn.com https://*.basemaps.cartocdn.com https://*.arcgisonline.com https://server.arcgisonline.com https://s3.amazonaws.com https://*.rainviewer.com; media-src 'self' blob: asset: http://asset.localhost https://asset.localhost; connect-src 'self' ws://localhost:* http://localhost:* https://x-fast-manager.vercel.app https://avwx.rest https://gateway.x-plane.com https://data.vatsim.net https://my.vatsim.net https://metar.vatsim.net https://api.rainviewer.com https://*.rainviewer.com https://www.simbrief.com https://*.tile.openstreetmap.org https://basemaps.cartocdn.com https://*.basemaps.cartocdn.com https://*.arcgisonline.com https://api.maptiler.com https://tiles.openfreemap.org https://s3.amazonaws.com https://github.com https://*.github.com https://objects.githubusercontent.com"
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "rpm",
+      "appimage",
+      "msi"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": [
+          "libgtk-3-0",
+          "libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "http": {
+      "scope": [
+        "https://data.vatsim.net/*",
+        "https://my.vatsim.net/*",
+        "https://metar.vatsim.net/*",
+        "https://api.rainviewer.com/*",
+        "https://*.rainviewer.com/*",
+        "https://www.simbrief.com/*",
+        "https://aviationweather.gov/*"
+      ]
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQjM3QUQzQTc5MDVCNEYKUldSUFc1Q24wM3F6Z3FFS3Exdk9QUzZmV0V4aWNkSTVCODZwY2lJQnExbnBWSW9ScExzQzlNRE0K",
+      "endpoints": [
+        "https://github.com/YOUR_GITHUB_USERNAME/DHUB-Manager/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1324 @@
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { useI18n } from 'vue-i18n'
+import {
+  getErrorMessage,
+  type CslPackageInfo,
+  type CslLinkSyncProgress,
+  type CslPath,
+  type CslScanResult,
+  type CslProgress,
+} from '@/types'
+import { useAppStore } from './app'
+import { useManagementStore } from './management'
+import { useToastStore } from './toast'
+import { logDebug, logError } from '@/services/logger'
+import { getItem, setItem, STORAGE_KEYS } from '@/services/storage'
+
+type InstallSource = 'csl' | 'altitude'
+
+interface QueuedInstallTask {
+  source: InstallSource
+  name: string
+}
+
+const CSL_MAX_PARALLEL_DOWNLOADS = 12
+const DEFAULT_CSL_SERVER_BASE_URL = 'http://x-csl.ru'
+const MAX_CSL_SERVER_BASE_URLS = 4
+const DESCRIPTION_LOAD_BATCH_SIZE = 12
+const DESCRIPTION_LOAD_QUEUE_DELAY_MS = 80
+const CHECKING_STATUS_BATCH_SIZE = 24
+
+function normalizeCustomPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.map((path) => path.trim()).filter((path) => path.length > 0)))
+}
+
+interface RescanPackagesOptions {
+  generation?: number
+  syncLinks?: boolean
+}
+
+interface ScanPackagesOptions {
+  syncLinks?: boolean
+}
+
+interface SyncLinksOptions {
+  packageNames?: string[]
+  cleanupPaths?: string[]
+  interactive?: boolean
+  targetPaths?: string[]
+}
+
+function isActionableStatus(status: CslPackageInfo['status']): boolean {
+  return status === 'not_installed' || status === 'needs_update'
+}
+
+function createOperationRequestId(operation: string): string {
+  const safeOperation = operation.trim().replace(/[^a-zA-Z0-9_-]+/g, '-')
+
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return `${safeOperation}-${globalThis.crypto.randomUUID()}`
+  }
+
+  return `${safeOperation}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+export const useCslStore = defineStore('csl', () => {
+  const appStore = useAppStore()
+  const managementStore = useManagementStore()
+  const toast = useToastStore()
+  const { t } = useI18n()
+
+  const packages = ref<CslPackageInfo[]>([])
+  const paths = ref<CslPath[]>([])
+  const customPaths = ref<string[]>([])
+  const installLocation = ref<string>('')
+  const serverVersion = ref('')
+  const serverBaseUrls = ref<string[]>([DEFAULT_CSL_SERVER_BASE_URL])
+  const activeServerBaseUrl = ref(DEFAULT_CSL_SERVER_BASE_URL)
+  const isLoading = ref(false)
+  const progressMap = ref<Record<string, CslProgress>>({})
+  const error = ref<string | null>(null)
+  const searchQuery = ref('')
+  const lastScannedXplanePath = ref('')
+
+  const altitudePackages = ref<CslPackageInfo[]>([])
+  const altitudeLoading = ref(false)
+  const altitudeProgressMap = ref<Record<string, CslProgress>>({})
+  const lastAltitudeScannedXplanePath = ref('')
+
+  const installQueue = ref<QueuedInstallTask[]>([])
+  const activeInstallTask = ref<QueuedInstallTask | null>(null)
+  const cancellingTaskKeys = ref<string[]>([])
+  const isServerConfigLoaded = ref(false)
+  const pendingDescriptionPackages = ref<string[]>([])
+  const loadingDescriptionPackages = ref<string[]>([])
+  const linkSyncRunning = ref(false)
+  const linkSyncInteractive = ref(false)
+  const linkSyncProgress = ref<CslLinkSyncProgress | null>(null)
+  const linkSyncNotice = ref('')
+  const linkSyncHasWork = computed(() => (linkSyncProgress.value?.total_files ?? 0) > 0)
+
+  let installQueueRunning = false
+  let descriptionLoadTimer: ReturnType<typeof setTimeout> | null = null
+  let descriptionLoadRunning = false
+  let descriptionLoadGeneration = 0
+  let scanGeneration = 0
+  let linkSyncDrainPromise: Promise<void> | null = null
+  let customPathsLoadPromise: Promise<void> | null = null
+  let installLocationLoadPromise: Promise<void> | null = null
+  let pendingMissingLinkSyncAllTargets = false
+  let pendingMissingLinkSyncInteractive = false
+  let activeLinkSyncRequestId = ''
+  let isCustomPathsLoaded = false
+  let isInstallLocationLoaded = false
+  const descriptionLoadQueue = new Set<string>()
+  const pendingReconcileLinkSyncPackages = new Set<string>()
+  const pendingMissingLinkSyncTargets = new Set<string>()
+  const pendingLinkCleanupPaths = new Set<string>()
+
+  const totalPackages = computed(() => packages.value.length)
+  const installedCount = computed(
+    () => packages.value.filter((p) => p.status !== 'not_installed').length,
+  )
+  const updatesCount = computed(
+    () => packages.value.filter((p) => p.status === 'needs_update').length,
+  )
+  const notUpToDateCount = computed(
+    () => packages.value.filter((p) => isActionableStatus(p.status)).length,
+  )
+
+  const allPaths = computed(() => {
+    const pathStrings = paths.value.map((p) => p.path)
+    for (const cp of customPaths.value) {
+      if (!pathStrings.includes(cp)) {
+        pathStrings.push(cp)
+      }
+    }
+    return pathStrings
+  })
+
+  const defaultCanonicalPath = computed(() => {
+    const root = appStore.xplanePath
+    if (!root) return ''
+    const separator = root.includes('\\') && !root.includes('/') ? '\\' : '/'
+    const trimmed = root.replace(/[\\/]+$/, '')
+    const tail = 'Resources/plugins/IVAO_CSL/CSL'.split('/').join(separator)
+    return `${trimmed}${separator}${tail}`
+  })
+
+  const resolvedInstallLocation = computed(
+    () => installLocation.value || defaultCanonicalPath.value,
+  )
+
+  const allScansDone = computed(() => !isLoading.value && !altitudeLoading.value)
+
+  const altitudeTotalPackages = computed(() => altitudePackages.value.length)
+  const altitudeInstalledCount = computed(
+    () => altitudePackages.value.filter((p) => p.status !== 'not_installed').length,
+  )
+  const altitudeUpdatesCount = computed(
+    () => altitudePackages.value.filter((p) => p.status === 'needs_update').length,
+  )
+  const altitudeNotUpToDateCount = computed(
+    () => altitudePackages.value.filter((p) => isActionableStatus(p.status)).length,
+  )
+
+  const queuedPackages = computed(() =>
+    installQueue.value.filter((task) => task.source === 'csl').map((task) => task.name),
+  )
+  const queuedAltitudePackages = computed(() =>
+    installQueue.value.filter((task) => task.source === 'altitude').map((task) => task.name),
+  )
+  const installingPackages = computed(() =>
+    activeInstallTask.value?.source === 'csl' ? [activeInstallTask.value.name] : [],
+  )
+  const altitudeInstallingPackages = computed(() =>
+    activeInstallTask.value?.source === 'altitude' ? [activeInstallTask.value.name] : [],
+  )
+  const cancellingPackages = computed(() =>
+    cancellingTaskKeys.value
+      .filter((key) => key.startsWith('csl:'))
+      .map((key) => key.slice('csl:'.length)),
+  )
+  const cancellingAltitudePackages = computed(() =>
+    cancellingTaskKeys.value
+      .filter((key) => key.startsWith('altitude:'))
+      .map((key) => key.slice('altitude:'.length)),
+  )
+  const hasPendingInstalls = computed(
+    () => activeInstallTask.value !== null || installQueue.value.length > 0,
+  )
+
+  function taskKey(task: QueuedInstallTask): string {
+    return `${task.source}:${task.name}`
+  }
+
+  function isTaskActive(task: QueuedInstallTask): boolean {
+    return activeInstallTask.value != null && taskKey(activeInstallTask.value) === taskKey(task)
+  }
+
+  function isTaskQueued(task: QueuedInstallTask): boolean {
+    return installQueue.value.some((queued) => taskKey(queued) === taskKey(task))
+  }
+
+  function isCancelledInstallError(error: unknown): boolean {
+    const message = getErrorMessage(error).toLowerCase()
+    return message.includes('cancelled') || message.includes('canceled')
+  }
+
+  function getParallelDownloads(): number {
+    return Math.min(
+      managementStore.addonUpdateOptions.totalThreads ?? 32,
+      CSL_MAX_PARALLEL_DOWNLOADS,
+    )
+  }
+
+  function normalizeServerBaseUrl(url: string): string {
+    const trimmed = url.trim()
+
+    if (!trimmed) {
+      throw new Error(t('csl.serverUrlRequired'))
+    }
+
+    let parsed: URL
+    try {
+      parsed = new URL(trimmed)
+    } catch {
+      throw new Error(t('csl.serverUrlInvalid'))
+    }
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error(t('csl.serverUrlInvalid'))
+    }
+
+    const pathname = parsed.pathname || '/'
+    const hasOnlyTrailingSlashes = /^\/+$/.test(pathname)
+
+    if (!hasOnlyTrailingSlashes || parsed.search || parsed.hash) {
+      throw new Error(t('csl.serverUrlNoPath'))
+    }
+
+    return parsed.origin
+  }
+
+  function collectServerBaseUrls(
+    urls: string[],
+    options: { ignoreInvalid?: boolean; ignoreDuplicates?: boolean } = {},
+  ): string[] {
+    const normalized: string[] = []
+
+    for (const rawUrl of urls) {
+      const trimmed = rawUrl.trim()
+      if (!trimmed) {
+        continue
+      }
+
+      try {
+        const normalizedUrl = normalizeServerBaseUrl(trimmed)
+
+        if (normalized.includes(normalizedUrl)) {
+          if (options.ignoreDuplicates) {
+            continue
+          }
+
+          throw new Error(t('csl.serverUrlDuplicate'))
+        }
+
+        normalized.push(normalizedUrl)
+      } catch (error) {
+        if (options.ignoreInvalid) {
+          continue
+        }
+
+        throw error
+      }
+    }
+
+    return normalized
+  }
+
+  async function ensureServerConfigLoaded() {
+    if (isServerConfigLoaded.value) {
+      return
+    }
+
+    const savedUrls = await getItem<string[]>(STORAGE_KEYS.CSL_SERVER_BASE_URLS)
+    const savedActiveUrl = await getItem<string>(STORAGE_KEYS.CSL_ACTIVE_SERVER_BASE_URL)
+
+    const nextUrls = Array.isArray(savedUrls)
+      ? collectServerBaseUrls(savedUrls, {
+          ignoreInvalid: true,
+          ignoreDuplicates: true,
+        }).slice(0, MAX_CSL_SERVER_BASE_URLS)
+      : []
+
+    if (nextUrls.length === 0) {
+      nextUrls.push(DEFAULT_CSL_SERVER_BASE_URL)
+    }
+
+    let nextActiveUrl = nextUrls[0]
+
+    if (typeof savedActiveUrl === 'string') {
+      try {
+        const normalizedActiveUrl = normalizeServerBaseUrl(savedActiveUrl)
+        if (nextUrls.includes(normalizedActiveUrl)) {
+          nextActiveUrl = normalizedActiveUrl
+        }
+      } catch {
+        nextActiveUrl = nextUrls[0]
+      }
+    }
+
+    serverBaseUrls.value = nextUrls
+    activeServerBaseUrl.value = nextActiveUrl
+    isServerConfigLoaded.value = true
+  }
+
+  async function saveServerConfig(urls: string[], selectedUrl: string) {
+    const nextUrls = collectServerBaseUrls(urls)
+
+    if (nextUrls.length === 0) {
+      throw new Error(t('csl.serverUrlRequired'))
+    }
+
+    if (nextUrls.length > MAX_CSL_SERVER_BASE_URLS) {
+      throw new Error(
+        t('csl.serverLimitReached', {
+          max: MAX_CSL_SERVER_BASE_URLS,
+        }),
+      )
+    }
+
+    const normalizedSelectedUrl = normalizeServerBaseUrl(selectedUrl)
+    if (!nextUrls.includes(normalizedSelectedUrl)) {
+      throw new Error(t('csl.serverSelectionRequired'))
+    }
+
+    serverBaseUrls.value = nextUrls
+    activeServerBaseUrl.value = normalizedSelectedUrl
+    isServerConfigLoaded.value = true
+
+    await setItem(STORAGE_KEYS.CSL_SERVER_BASE_URLS, nextUrls)
+    await setItem(STORAGE_KEYS.CSL_ACTIVE_SERVER_BASE_URL, normalizedSelectedUrl)
+  }
+
+  async function ensureCustomPathsLoaded() {
+    if (isCustomPathsLoaded) {
+      return
+    }
+
+    if (customPathsLoadPromise) {
+      await customPathsLoadPromise
+      return
+    }
+
+    customPathsLoadPromise = (async () => {
+      const savedPaths = await getItem<string[]>(STORAGE_KEYS.CSL_CUSTOM_PATHS)
+      customPaths.value = Array.isArray(savedPaths) ? normalizeCustomPaths(savedPaths) : []
+      isCustomPathsLoaded = true
+    })()
+
+    try {
+      await customPathsLoadPromise
+    } finally {
+      customPathsLoadPromise = null
+    }
+  }
+
+  async function ensureInstallLocationLoaded() {
+    if (isInstallLocationLoaded) {
+      return
+    }
+
+    if (installLocationLoadPromise) {
+      await installLocationLoadPromise
+      return
+    }
+
+    installLocationLoadPromise = (async () => {
+      const saved = await getItem<string>(STORAGE_KEYS.CSL_INSTALL_LOCATION)
+      installLocation.value = typeof saved === 'string' ? saved.trim() : ''
+      isInstallLocationLoaded = true
+    })()
+
+    try {
+      await installLocationLoadPromise
+    } finally {
+      installLocationLoadPromise = null
+    }
+  }
+
+  function pathKey(p: string): string {
+    return p.replace(/\\/g, '/').replace(/\/+$/, '')
+  }
+
+  async function setInstallLocation(absolutePath: string): Promise<boolean> {
+    await ensureInstallLocationLoaded()
+
+    const trimmed = absolutePath.trim()
+    const defaultKey = pathKey(defaultCanonicalPath.value)
+    const next = trimmed === '' || pathKey(trimmed) === defaultKey ? '' : trimmed
+
+    if (next === installLocation.value) {
+      return false
+    }
+
+    installLocation.value = next
+    await setItem(STORAGE_KEYS.CSL_INSTALL_LOCATION, next)
+    toast.info(t('csl.installLocationChanged'))
+    return true
+  }
+
+  async function pruneDetectedCustomPaths(detectedPaths: CslPath[]) {
+    const detectedPathSet = new Set(
+      detectedPaths
+        .filter((entry) => entry.source === 'auto')
+        .map((entry) => entry.path.trim())
+        .filter((path) => path.length > 0),
+    )
+
+    if (detectedPathSet.size === 0) {
+      return
+    }
+
+    const nextCustomPaths = customPaths.value.filter((path) => !detectedPathSet.has(path))
+
+    if (nextCustomPaths.length === customPaths.value.length) {
+      return
+    }
+
+    customPaths.value = nextCustomPaths
+    await setItem(STORAGE_KEYS.CSL_CUSTOM_PATHS, nextCustomPaths)
+  }
+
+  function beginTrackedLinkSync(requestId: string, interactive: boolean) {
+    activeLinkSyncRequestId = requestId
+    linkSyncRunning.value = false
+    linkSyncInteractive.value = interactive
+    linkSyncProgress.value = null
+    linkSyncNotice.value = ''
+  }
+
+  function finishTrackedLinkSync(requestId: string) {
+    if (activeLinkSyncRequestId !== requestId) {
+      return
+    }
+
+    activeLinkSyncRequestId = ''
+    linkSyncRunning.value = false
+    linkSyncInteractive.value = false
+  }
+
+  function resetDescriptionLoadState(packageNames: string[]) {
+    descriptionLoadGeneration += 1
+    pendingDescriptionPackages.value = [...new Set(packageNames)]
+    loadingDescriptionPackages.value = []
+
+    descriptionLoadQueue.clear()
+    if (descriptionLoadTimer !== null) {
+      clearTimeout(descriptionLoadTimer)
+      descriptionLoadTimer = null
+    }
+  }
+
+  function isDescriptionPending(packageName: string): boolean {
+    return pendingDescriptionPackages.value.includes(packageName)
+  }
+
+  function isDescriptionLoading(packageName: string): boolean {
+    return loadingDescriptionPackages.value.includes(packageName)
+  }
+
+  function queuePackageDescriptions(packageNames: string[]) {
+    const nextNames = packageNames.filter(
+      (name) => isDescriptionPending(name) && !isDescriptionLoading(name),
+    )
+
+    if (nextNames.length === 0) {
+      return
+    }
+
+    for (const name of nextNames) {
+      descriptionLoadQueue.add(name)
+    }
+
+    if (descriptionLoadTimer !== null) {
+      return
+    }
+
+    descriptionLoadTimer = setTimeout(() => {
+      descriptionLoadTimer = null
+      void pumpDescriptionQueue(descriptionLoadGeneration)
+    }, DESCRIPTION_LOAD_QUEUE_DELAY_MS)
+  }
+
+  async function pumpDescriptionQueue(generation: number) {
+    if (descriptionLoadRunning || generation !== descriptionLoadGeneration) {
+      return
+    }
+
+    descriptionLoadRunning = true
+
+    try {
+      while (descriptionLoadQueue.size > 0 && generation === descriptionLoadGeneration) {
+        const batch = Array.from(descriptionLoadQueue)
+          .filter((name) => isDescriptionPending(name) && !isDescriptionLoading(name))
+          .slice(0, DESCRIPTION_LOAD_BATCH_SIZE)
+
+        if (batch.length === 0) {
+          break
+        }
+
+        for (const name of batch) {
+          descriptionLoadQueue.delete(name)
+        }
+
+        loadingDescriptionPackages.value = [
+          ...new Set([...loadingDescriptionPackages.value, ...batch]),
+        ]
+
+        let generationChanged = false
+        const requestId = createOperationRequestId('csl-description')
+
+        try {
+          await ensureServerConfigLoaded()
+          logDebug(
+            `[${requestId}] invoke csl_fetch_package_descriptions start batch_size=${batch.length} server=${activeServerBaseUrl.value} packages=${batch.join(',')}`,
+            'csl',
+          )
+          const descriptions = await invoke<Record<string, string>>(
+            'csl_fetch_package_descriptions',
+            {
+              packageNames: batch,
+              serverBaseUrl: activeServerBaseUrl.value,
+              requestId,
+            },
+          )
+          logDebug(
+            `[${requestId}] invoke csl_fetch_package_descriptions success descriptions=${Object.keys(descriptions).length}`,
+            'csl',
+          )
+
+          if (generation !== descriptionLoadGeneration) {
+            generationChanged = true
+          } else {
+            for (const pkg of packages.value) {
+              const description = descriptions[pkg.name]
+              if (typeof description === 'string' && description.trim()) {
+                pkg.description = description
+              }
+            }
+          }
+        } catch (e) {
+          logError(`[${requestId}] CSL description fetch failed: ${getErrorMessage(e)}`, 'csl')
+        } finally {
+          if (!generationChanged && generation === descriptionLoadGeneration) {
+            loadingDescriptionPackages.value = loadingDescriptionPackages.value.filter(
+              (name) => !batch.includes(name),
+            )
+            pendingDescriptionPackages.value = pendingDescriptionPackages.value.filter(
+              (name) => !batch.includes(name),
+            )
+          }
+        }
+
+        if (generationChanged || generation !== descriptionLoadGeneration) {
+          break
+        }
+      }
+    } finally {
+      descriptionLoadRunning = false
+
+      if (generation === descriptionLoadGeneration && descriptionLoadQueue.size > 0) {
+        void pumpDescriptionQueue(generation)
+      }
+    }
+  }
+
+  async function syncLinks(options: SyncLinksOptions = {}) {
+    const {
+      packageNames,
+      cleanupPaths,
+      interactive = false,
+      targetPaths,
+    } = options
+    const hasExplicitTargetPaths = targetPaths !== undefined
+
+    if (!appStore.xplanePath) {
+      return
+    }
+
+    await Promise.all([ensureCustomPathsLoaded(), ensureInstallLocationLoaded()])
+
+    if (!packageNames || packageNames.length === 0) {
+      if (!hasExplicitTargetPaths) {
+        pendingMissingLinkSyncAllTargets = true
+        pendingMissingLinkSyncTargets.clear()
+      } else if (!pendingMissingLinkSyncAllTargets) {
+        for (const targetPath of targetPaths ?? []) {
+          const normalizedTargetPath = targetPath.trim()
+          if (normalizedTargetPath) {
+            pendingMissingLinkSyncTargets.add(normalizedTargetPath)
+          }
+        }
+      }
+    } else {
+      for (const packageName of packageNames) {
+        const normalizedPackageName = packageName.trim()
+        if (normalizedPackageName) {
+          pendingReconcileLinkSyncPackages.add(normalizedPackageName)
+        }
+      }
+    }
+
+    for (const cleanupPath of cleanupPaths ?? []) {
+      const normalizedCleanupPath = cleanupPath.trim()
+      if (normalizedCleanupPath) {
+        pendingLinkCleanupPaths.add(normalizedCleanupPath)
+      }
+    }
+
+    if (interactive && (!packageNames || packageNames.length === 0)) {
+      pendingMissingLinkSyncInteractive = true
+    }
+
+    if (linkSyncDrainPromise) {
+      await linkSyncDrainPromise
+      return
+    }
+
+    const drainPromise = (async () => {
+      while (true) {
+        if (
+          !pendingMissingLinkSyncAllTargets &&
+          pendingMissingLinkSyncTargets.size === 0 &&
+          pendingReconcileLinkSyncPackages.size === 0 &&
+          pendingLinkCleanupPaths.size === 0
+        ) {
+          return
+        }
+
+        const shouldRunMissingOnlySync =
+          pendingMissingLinkSyncAllTargets ||
+          pendingMissingLinkSyncTargets.size > 0 ||
+          pendingLinkCleanupPaths.size > 0
+
+        const queuedPackageNames = shouldRunMissingOnlySync
+          ? null
+          : Array.from(pendingReconcileLinkSyncPackages).sort()
+        const queuedTargetPaths = shouldRunMissingOnlySync
+          ? pendingMissingLinkSyncAllTargets
+            ? null
+            : Array.from(pendingMissingLinkSyncTargets)
+          : null
+        const queuedCleanupPaths = shouldRunMissingOnlySync
+          ? Array.from(pendingLinkCleanupPaths)
+          : []
+        const queuedInteractive = shouldRunMissingOnlySync && pendingMissingLinkSyncInteractive
+
+        if (shouldRunMissingOnlySync) {
+          pendingMissingLinkSyncAllTargets = false
+          pendingMissingLinkSyncTargets.clear()
+          pendingLinkCleanupPaths.clear()
+          pendingMissingLinkSyncInteractive = false
+        } else {
+          pendingReconcileLinkSyncPackages.clear()
+        }
+
+        const requestId = createOperationRequestId('csl-sync-links')
+
+        try {
+          beginTrackedLinkSync(requestId, queuedInteractive)
+          logDebug(
+            `[${requestId}] invoke csl_sync_links start xplane_path=${appStore.xplanePath} custom_paths=${customPaths.value.length} packages=${queuedPackageNames?.length ?? 0} cleanup_paths=${queuedCleanupPaths.length} target_paths=${queuedTargetPaths?.length ?? 0} interactive=${queuedInteractive}`,
+            'csl',
+          )
+          await invoke('csl_sync_links', {
+            xplanePath: appStore.xplanePath,
+            customPaths: customPaths.value,
+            installLocation: installLocation.value || null,
+            packageNames:
+              queuedPackageNames && queuedPackageNames.length > 0 ? queuedPackageNames : null,
+            targetPaths: queuedTargetPaths ?? null,
+            cleanupPaths: queuedCleanupPaths.length > 0 ? queuedCleanupPaths : null,
+            requestId,
+          })
+          logDebug(`[${requestId}] invoke csl_sync_links success`, 'csl')
+        } catch (e) {
+          logError(`[${requestId}] CSL link sync failed: ${getErrorMessage(e)}`, 'csl')
+          if (queuedInteractive) {
+            toast.error(t('csl.syncError'))
+          }
+        } finally {
+          finishTrackedLinkSync(requestId)
+        }
+      }
+    })()
+    linkSyncDrainPromise = drainPromise
+
+    try {
+      await drainPromise
+    } finally {
+      if (linkSyncDrainPromise === drainPromise) {
+        linkSyncDrainPromise = null
+      }
+    }
+  }
+
+  function clearProgressForTask(task: QueuedInstallTask) {
+    if (task.source === 'altitude') {
+      const nextMap = { ...altitudeProgressMap.value }
+      delete nextMap[task.name]
+      altitudeProgressMap.value = nextMap
+      return
+    }
+
+    const nextMap = { ...progressMap.value }
+    delete nextMap[task.name]
+    progressMap.value = nextMap
+  }
+
+  function enqueueInstallTask(task: QueuedInstallTask) {
+    if (isTaskActive(task) || isTaskQueued(task)) {
+      logDebug(`Skip duplicate install task source=${task.source} name=${task.name}`, task.source)
+      return
+    }
+
+    logDebug(`Queue install task source=${task.source} name=${task.name}`, task.source)
+    installQueue.value = [...installQueue.value, task]
+    void pumpInstallQueue()
+  }
+
+  function enqueueInstallTasks(tasks: QueuedInstallTask[]) {
+    let nextQueue = installQueue.value
+    let changed = false
+
+    for (const task of tasks) {
+      if (isTaskActive(task) || nextQueue.some((queued) => taskKey(queued) === taskKey(task))) {
+        logDebug(`Skip duplicate install task source=${task.source} name=${task.name}`, task.source)
+        continue
+      }
+      nextQueue = [...nextQueue, task]
+      changed = true
+      logDebug(`Queue install task source=${task.source} name=${task.name}`, task.source)
+    }
+
+    if (!changed) {
+      return
+    }
+
+    installQueue.value = nextQueue
+    void pumpInstallQueue()
+  }
+
+  async function runInstallTask(task: QueuedInstallTask): Promise<boolean> {
+    await managementStore.loadAddonUpdateOptions()
+    await ensureServerConfigLoaded()
+    await Promise.all([ensureCustomPathsLoaded(), ensureInstallLocationLoaded()])
+
+    const parallelDownloads = getParallelDownloads()
+    const requestId = createOperationRequestId(
+      task.source === 'altitude' ? 'altitude-install' : 'csl-install',
+    )
+
+    if (task.source === 'altitude') {
+      try {
+        logDebug(
+          `[${requestId}] invoke altitude_install_package start package=${task.name} xplane_path=${appStore.xplanePath} parallel_downloads=${parallelDownloads} server=${activeServerBaseUrl.value}`,
+          'altitude',
+        )
+        await invoke('altitude_install_package', {
+          xplanePath: appStore.xplanePath,
+          parallelDownloads,
+          serverBaseUrl: activeServerBaseUrl.value,
+          requestId,
+        })
+        logDebug(
+          `[${requestId}] invoke altitude_install_package success package=${task.name}`,
+          'altitude',
+        )
+
+        toast.success(t('altitude.installSuccess', { name: task.name }))
+
+        for (const pkg of altitudePackages.value) {
+          pkg.status = 'up_to_date'
+          pkg.files_to_update = 0
+          pkg.update_size_bytes = 0
+        }
+
+        return false
+      } catch (e) {
+        if (isCancelledInstallError(e)) {
+          logDebug(
+            `[${requestId}] invoke altitude_install_package cancelled package=${task.name}`,
+            'altitude',
+          )
+          toast.info(t('altitude.cancelled', { name: task.name }))
+          return false
+        }
+
+        logError(`[${requestId}] ALTITUDE install failed: ${getErrorMessage(e)}`, 'altitude')
+        toast.error(t('altitude.installError', { name: task.name }))
+        return false
+      }
+    }
+
+    try {
+      logDebug(
+        `[${requestId}] invoke csl_install_package start package=${task.name} xplane_path=${appStore.xplanePath} custom_paths=${customPaths.value.length} parallel_downloads=${parallelDownloads} server=${activeServerBaseUrl.value}`,
+        'csl',
+      )
+      await invoke('csl_install_package', {
+        packageName: task.name,
+        xplanePath: appStore.xplanePath,
+        customPaths: customPaths.value,
+        installLocation: installLocation.value || null,
+        parallelDownloads,
+        serverBaseUrl: activeServerBaseUrl.value,
+        requestId,
+      })
+      logDebug(`[${requestId}] invoke csl_install_package success package=${task.name}`, 'csl')
+
+      toast.success(t('csl.installSuccess', { name: task.name }))
+
+      const pkg = packages.value.find((item) => item.name === task.name)
+      if (pkg) {
+        pkg.status = 'up_to_date'
+        pkg.files_to_update = 0
+        pkg.update_size_bytes = 0
+      }
+    } catch (e) {
+      if (isCancelledInstallError(e)) {
+        logDebug(`[${requestId}] invoke csl_install_package cancelled package=${task.name}`, 'csl')
+        toast.info(t('csl.cancelled', { name: task.name }))
+        return true
+      }
+
+      logError(`[${requestId}] CSL install failed for ${task.name}: ${getErrorMessage(e)}`, 'csl')
+      toast.error(t('csl.installError', { name: task.name }))
+      return true
+    }
+
+    return true
+  }
+
+  async function pumpInstallQueue() {
+    if (installQueueRunning) {
+      return
+    }
+
+    installQueueRunning = true
+    logDebug(`Install queue pump started queued=${installQueue.value.length}`, 'csl')
+
+    try {
+      while (true) {
+        const nextTask = installQueue.value[0]
+
+        if (!nextTask) {
+          break
+        }
+
+        installQueue.value = installQueue.value.slice(1)
+        activeInstallTask.value = nextTask
+        logDebug(
+          `Install queue running source=${nextTask.source} name=${nextTask.name}`,
+          nextTask.source,
+        )
+
+        try {
+          const shouldRescan = await runInstallTask(nextTask)
+          logDebug(
+            `Install queue finished source=${nextTask.source} name=${nextTask.name} should_rescan=${shouldRescan}`,
+            nextTask.source,
+          )
+          if (shouldRescan && nextTask.source === 'csl') {
+            await rescanPackages([nextTask.name])
+          }
+        } finally {
+          cancellingTaskKeys.value = cancellingTaskKeys.value.filter(
+            (key) => key !== taskKey(nextTask),
+          )
+          activeInstallTask.value = null
+          clearProgressForTask(nextTask)
+        }
+      }
+    } finally {
+      installQueueRunning = false
+      logDebug(`Install queue pump stopped queued=${installQueue.value.length}`, 'csl')
+
+      if (installQueue.value.length > 0) {
+        void pumpInstallQueue()
+      }
+    }
+  }
+
+  async function scanPackages(options: ScanPackagesOptions = {}) {
+    if (!appStore.xplanePath) {
+      error.value = t('csl.noPathsDetected')
+      return
+    }
+
+    const generation = ++scanGeneration
+    await ensureServerConfigLoaded()
+    await Promise.all([ensureCustomPathsLoaded(), ensureInstallLocationLoaded()])
+    isLoading.value = true
+    error.value = null
+    if (options.syncLinks) {
+      void syncLinks()
+    }
+    const requestId = createOperationRequestId('csl-scan')
+
+    try {
+      logDebug(
+        `[${requestId}] invoke csl_scan_packages start xplane_path=${appStore.xplanePath} custom_paths=${customPaths.value.length} server=${activeServerBaseUrl.value}`,
+        'csl',
+      )
+      const result = await invoke<CslScanResult>('csl_scan_packages', {
+        xplanePath: appStore.xplanePath,
+        customPaths: customPaths.value,
+        installLocation: installLocation.value || null,
+        serverBaseUrl: activeServerBaseUrl.value,
+        requestId,
+      })
+      logDebug(
+        `[${requestId}] invoke csl_scan_packages success packages=${result.packages.length} paths=${result.paths.length} server_version=${result.server_version}`,
+        'csl',
+      )
+
+      const autoDetectedPaths = result.paths.filter((entry) => entry.source === 'auto')
+
+      packages.value = result.packages
+      paths.value = autoDetectedPaths
+      await pruneDetectedCustomPaths(autoDetectedPaths)
+      serverVersion.value = result.server_version
+      lastScannedXplanePath.value = appStore.xplanePath
+      if (result.index_warning) {
+        logError(`[${requestId}] ${result.index_warning}`, 'csl')
+        toast.warning(result.index_warning)
+      }
+      resetDescriptionLoadState(
+        result.packages.filter((pkg) => !pkg.description).map((pkg) => pkg.name),
+      )
+      void resolveCheckingPackages(
+        result.packages.filter((pkg) => pkg.status === 'checking').map((pkg) => pkg.name),
+        generation,
+      )
+    } catch (e) {
+      resetDescriptionLoadState([])
+      error.value = getErrorMessage(e)
+      logError(`[${requestId}] CSL scan failed: ${getErrorMessage(e)}`, 'csl')
+      toast.error(error.value || t('csl.fetchError'))
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function resolveCheckingPackages(packageNames: string[], generation: number) {
+    const uniquePackages = [...new Set(packageNames)]
+    if (uniquePackages.length === 0) {
+      return
+    }
+
+    for (let i = 0; i < uniquePackages.length; i += CHECKING_STATUS_BATCH_SIZE) {
+      if (generation !== scanGeneration) {
+        logDebug(
+          `Skip outdated CSL checking batch generation=${generation} current_generation=${scanGeneration}`,
+          'csl',
+        )
+        return
+      }
+
+      const batch = uniquePackages.slice(i, i + CHECKING_STATUS_BATCH_SIZE)
+      await rescanPackages(batch, {
+        generation,
+        syncLinks: false,
+      })
+    }
+  }
+
+  async function rescanPackages(packageNames: string[], options: RescanPackagesOptions = {}) {
+    if (!appStore.xplanePath || packageNames.length === 0) {
+      return
+    }
+
+    const generation = options.generation ?? scanGeneration
+    const requestId = createOperationRequestId('csl-rescan')
+
+    try {
+      await ensureServerConfigLoaded()
+      if (generation !== scanGeneration) {
+        logDebug(
+          `[${requestId}] skip stale csl_rescan_packages before invoke generation=${generation} current_generation=${scanGeneration}`,
+          'csl',
+        )
+        return
+      }
+      logDebug(
+        `[${requestId}] invoke csl_rescan_packages start xplane_path=${appStore.xplanePath} package_count=${packageNames.length} packages=${packageNames.join(',')} server=${activeServerBaseUrl.value}`,
+        'csl',
+      )
+      const updated = await invoke<CslPackageInfo[]>('csl_rescan_packages', {
+        xplanePath: appStore.xplanePath,
+        packageNames,
+        installLocation: installLocation.value || null,
+        serverBaseUrl: activeServerBaseUrl.value,
+        requestId,
+      })
+      logDebug(
+        `[${requestId}] invoke csl_rescan_packages success packages=${updated.length}`,
+        'csl',
+      )
+
+      if (generation !== scanGeneration) {
+        logDebug(
+          `[${requestId}] ignore stale csl_rescan_packages result generation=${generation} current_generation=${scanGeneration}`,
+          'csl',
+        )
+        return
+      }
+
+      for (const upd of updated) {
+        const index = packages.value.findIndex((p) => p.name === upd.name)
+        if (index !== -1) {
+          upd.description = packages.value[index].description
+          packages.value[index] = upd
+        }
+      }
+
+      if (options.syncLinks ?? true) {
+        await syncLinks({ packageNames })
+      }
+    } catch (e) {
+      logError(`[${requestId}] CSL partial rescan failed: ${getErrorMessage(e)}`, 'csl')
+    }
+  }
+
+  function installPackage(packageName: string) {
+    enqueueInstallTask({ source: 'csl', name: packageName })
+  }
+
+  function installAll() {
+    enqueueInstallTasks(
+      packages.value
+        .filter((pkg) => isActionableStatus(pkg.status))
+        .map((pkg) => ({ source: 'csl' as const, name: pkg.name })),
+    )
+  }
+
+  async function uninstallPackage(packageName: string) {
+    const requestId = createOperationRequestId('csl-uninstall')
+
+    try {
+      await Promise.all([ensureCustomPathsLoaded(), ensureInstallLocationLoaded()])
+      logDebug(
+        `[${requestId}] invoke csl_uninstall_package start package=${packageName} xplane_path=${appStore.xplanePath} custom_paths=${customPaths.value.length}`,
+        'csl',
+      )
+      await invoke('csl_uninstall_package', {
+        packageName,
+        xplanePath: appStore.xplanePath,
+        customPaths: customPaths.value,
+        installLocation: installLocation.value || null,
+        requestId,
+      })
+      logDebug(`[${requestId}] invoke csl_uninstall_package success package=${packageName}`, 'csl')
+
+      toast.success(t('csl.uninstallSuccess', { name: packageName }))
+
+      const pkg = packages.value.find((item) => item.name === packageName)
+      if (pkg) {
+        pkg.status = 'not_installed'
+        pkg.files_to_update = pkg.file_count
+        pkg.update_size_bytes = pkg.total_size_bytes
+      }
+    } catch (e) {
+      logError(
+        `[${requestId}] CSL uninstall failed for ${packageName}: ${getErrorMessage(e)}`,
+        'csl',
+      )
+      toast.error(t('csl.uninstallError', { name: packageName }))
+    }
+  }
+
+  async function applyCustomPaths(nextPaths: string[]) {
+    await ensureCustomPathsLoaded()
+
+    const normalizedNextPaths = normalizeCustomPaths(nextPaths)
+    const existingKeys = new Set(customPaths.value.map(pathKey))
+    const nextKeys = new Set(normalizedNextPaths.map(pathKey))
+    const addedPaths = normalizedNextPaths.filter((path) => !existingKeys.has(pathKey(path)))
+    const removedPaths = customPaths.value.filter((path) => !nextKeys.has(pathKey(path)))
+
+    customPaths.value = normalizedNextPaths
+    await setItem(STORAGE_KEYS.CSL_CUSTOM_PATHS, normalizedNextPaths)
+    if (addedPaths.length > 0 || removedPaths.length > 0) {
+      await syncLinks({
+        targetPaths: addedPaths,
+        cleanupPaths: removedPaths,
+        interactive: true,
+      })
+    }
+  }
+
+  function updateProgress(prog: CslProgress) {
+    progressMap.value = { ...progressMap.value, [prog.package_name]: prog }
+  }
+
+  function updateLinkSyncProgress(progress: CslLinkSyncProgress) {
+    if (progress.request_id !== activeLinkSyncRequestId) {
+      return
+    }
+
+    linkSyncProgress.value = progress
+    if (progress.total_files > 0) {
+      linkSyncRunning.value = true
+    }
+    if (typeof progress.message === 'string' && progress.message.trim()) {
+      linkSyncNotice.value = progress.message
+    }
+  }
+
+  async function scanAltitudePackages() {
+    if (!appStore.xplanePath) return
+
+    await ensureServerConfigLoaded()
+    altitudeLoading.value = true
+    const requestId = createOperationRequestId('altitude-scan')
+
+    try {
+      logDebug(
+        `[${requestId}] invoke altitude_scan_packages start xplane_path=${appStore.xplanePath} server=${activeServerBaseUrl.value}`,
+        'altitude',
+      )
+      const result = await invoke<CslScanResult>('altitude_scan_packages', {
+        xplanePath: appStore.xplanePath,
+        serverBaseUrl: activeServerBaseUrl.value,
+        requestId,
+      })
+      logDebug(
+        `[${requestId}] invoke altitude_scan_packages success packages=${result.packages.length} server_version=${result.server_version}`,
+        'altitude',
+      )
+
+      altitudePackages.value = result.packages
+      lastAltitudeScannedXplanePath.value = appStore.xplanePath
+      if (result.index_warning) {
+        logError(`[${requestId}] ${result.index_warning}`, 'altitude')
+        toast.warning(result.index_warning)
+      }
+    } catch (e) {
+      logError(`[${requestId}] ALTITUDE scan failed: ${getErrorMessage(e)}`, 'altitude')
+      toast.error(getErrorMessage(e) || t('altitude.fetchError'))
+    } finally {
+      altitudeLoading.value = false
+    }
+  }
+
+  function installAltitudePackage() {
+    enqueueInstallTask({ source: 'altitude', name: 'ALTITUDE' })
+  }
+
+  function installAllAltitude() {
+    if (altitudePackages.value.some((pkg) => pkg.status !== 'up_to_date')) {
+      installAltitudePackage()
+    }
+  }
+
+  function installAllCombined(tasks: QueuedInstallTask[]) {
+    enqueueInstallTasks(tasks)
+  }
+
+  async function cancelInstall(source: InstallSource, packageName: string) {
+    const task = { source, name: packageName }
+    const key = taskKey(task)
+
+    if (isTaskActive(task)) {
+      if (cancellingTaskKeys.value.includes(key)) {
+        return
+      }
+
+      cancellingTaskKeys.value = [...cancellingTaskKeys.value, key]
+      const requestId = createOperationRequestId(`${source}-cancel`)
+
+      try {
+        logDebug(
+          `[${requestId}] invoke csl_cancel_install start source=${source} package=${packageName}`,
+          source,
+        )
+        await invoke('csl_cancel_install', {
+          source,
+          packageName,
+          requestId,
+        })
+        logDebug(
+          `[${requestId}] invoke csl_cancel_install success source=${source} package=${packageName}`,
+          source,
+        )
+      } catch (e) {
+        cancellingTaskKeys.value = cancellingTaskKeys.value.filter((item) => item !== key)
+        logError(`[${requestId}] Failed to cancel ${key}: ${getErrorMessage(e)}`, 'csl')
+        toast.error(
+          source === 'altitude'
+            ? t('altitude.cancelError', { name: packageName })
+            : t('csl.cancelError', { name: packageName }),
+        )
+      }
+
+      return
+    }
+
+    logDebug(`Remove queued install task source=${source} package=${packageName}`, source)
+    installQueue.value = installQueue.value.filter((queued) => taskKey(queued) !== key)
+    clearProgressForTask(task)
+  }
+
+  async function uninstallAltitudePackage() {
+    if (!appStore.xplanePath) return
+
+    const requestId = createOperationRequestId('altitude-uninstall')
+
+    try {
+      await ensureServerConfigLoaded()
+      logDebug(
+        `[${requestId}] invoke altitude_uninstall_package start xplane_path=${appStore.xplanePath} server=${activeServerBaseUrl.value}`,
+        'altitude',
+      )
+      await invoke('altitude_uninstall_package', {
+        xplanePath: appStore.xplanePath,
+        serverBaseUrl: activeServerBaseUrl.value,
+        requestId,
+      })
+      logDebug(`[${requestId}] invoke altitude_uninstall_package success`, 'altitude')
+
+      toast.success(t('altitude.uninstallSuccess', { name: 'ALTITUDE' }))
+
+      for (const pkg of altitudePackages.value) {
+        pkg.status = 'not_installed'
+        pkg.files_to_update = pkg.file_count
+        pkg.update_size_bytes = pkg.total_size_bytes
+      }
+    } catch (e) {
+      logError(`[${requestId}] ALTITUDE uninstall failed: ${getErrorMessage(e)}`, 'altitude')
+      toast.error(t('altitude.uninstallError', { name: 'ALTITUDE' }))
+    }
+  }
+
+  function updateAltitudeProgress(prog: CslProgress) {
+    altitudeProgressMap.value = { ...altitudeProgressMap.value, [prog.package_name]: prog }
+  }
+
+  return {
+    packages,
+    paths,
+    customPaths,
+    installLocation,
+    defaultCanonicalPath,
+    resolvedInstallLocation,
+    serverVersion,
+    serverBaseUrls,
+    activeServerBaseUrl,
+    isLoading,
+    installingPackages,
+    queuedPackages,
+    cancellingPackages,
+    progressMap,
+    error,
+    searchQuery,
+    lastScannedXplanePath,
+    pendingDescriptionPackages,
+    loadingDescriptionPackages,
+    linkSyncRunning,
+    linkSyncInteractive,
+    linkSyncProgress,
+    linkSyncNotice,
+    linkSyncHasWork,
+
+    totalPackages,
+    installedCount,
+    updatesCount,
+    notUpToDateCount,
+    allPaths,
+    allScansDone,
+    hasPendingInstalls,
+
+    scanPackages,
+    syncLinks,
+    ensureServerConfigLoaded,
+    ensureCustomPathsLoaded,
+    ensureInstallLocationLoaded,
+    setInstallLocation,
+    saveServerConfig,
+    queuePackageDescriptions,
+    isDescriptionPending,
+    isDescriptionLoading,
+    installPackage,
+    installAll,
+    installAllCombined,
+    cancelInstall,
+    uninstallPackage,
+    applyCustomPaths,
+    updateProgress,
+    updateLinkSyncProgress,
+
+    altitudePackages,
+    altitudeLoading,
+    altitudeInstallingPackages,
+    queuedAltitudePackages,
+    cancellingAltitudePackages,
+    altitudeProgressMap,
+    lastAltitudeScannedXplanePath,
+
+    altitudeTotalPackages,
+    altitudeInstalledCount,
+    altitudeUpdatesCount,
+    altitudeNotUpToDateCount,
+
+    scanAltitudePackages,
+    installAltitudePackage,
+    installAllAltitude,
+    uninstallAltitudePackage,
+    updateAltitudeProgress,
+  }
+})

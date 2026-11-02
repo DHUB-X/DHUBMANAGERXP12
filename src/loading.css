@@ -1,0 +1,221 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+#loading-screen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 50% 45%, #0f224a 0%, #081126 60%, #040814 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+#loading-screen.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Radar Viewport */
+.radar-viewport {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Radar Rings */
+.radar-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(56, 189, 248, 0.15);
+  pointer-events: none;
+}
+.radar-ring.r1 { width: 60px; height: 60px; border-color: rgba(56, 189, 248, 0.28); }
+.radar-ring.r2 { width: 110px; height: 110px; }
+.radar-ring.r3 { width: 160px; height: 160px; border-style: dashed; border-color: rgba(56, 189, 248, 0.22); }
+
+/* Radar Sweeper */
+.radar-sweep {
+  position: absolute;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0deg, transparent 270deg, rgba(56, 189, 248, 0.05) 300deg, rgba(56, 189, 248, 0.35) 360deg);
+  animation: radarSpin 2.4s linear infinite;
+  will-change: transform;
+}
+
+/* Radar Expanding Ping Ripple */
+.radar-ping {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.6);
+  animation: pingExpand 2.4s cubic-bezier(0, 0.2, 0.8, 1) infinite;
+  pointer-events: none;
+}
+
+/* Center Aircraft Jet Icon */
+.radar-jet {
+  position: relative;
+  z-index: 5;
+  width: 38px;
+  height: 38px;
+  color: #38bdf8;
+  filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.75));
+  animation: jetHover 3s ease-in-out infinite;
+}
+
+@keyframes radarSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pingExpand {
+  0% { transform: scale(0.6); opacity: 0.9; }
+  80% { transform: scale(3.6); opacity: 0; }
+  100% { transform: scale(3.8); opacity: 0; }
+}
+
+@keyframes jetHover {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-4px) scale(1.04); }
+}
+
+.app-title {
+  margin-top: 24px;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-shadow: 0 0 24px rgba(56, 189, 248, 0.5);
+}
+
+.app-subtitle {
+  margin-top: 4px;
+  color: #64748b;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+/* High-tech Loading Progress Line */
+.loading-bar-track {
+  margin-top: 20px;
+  width: 140px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  overflow: hidden;
+  position: relative;
+}
+
+.loading-bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, #38bdf8, #0284c7, transparent);
+  border-radius: 9999px;
+  animation: progressSlide 1.5s ease-in-out infinite;
+}
+
+@keyframes progressSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+.loading-text {
+  margin-top: 12px;
+  color: #94a3b8;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* Error state styles - preloaded for JS crash scenarios */
+.error-text { color: #ff6b6b !important; }
+.loader.error-state {
+  animation: none !important;
+  border-color: #ff6b6b !important;
+  border-top-color: #ff6b6b !important;
+}
+.error-container {
+  margin-top: 30px;
+  text-align: center;
+  max-width: 500px;
+  padding: 0 20px;
+}
+.error-message {
+  color: #fff;
+  font-size: 14px;
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+.error-details {
+  color: rgba(255,255,255,0.7);
+  font-size: 12px;
+  font-family: monospace;
+  background: rgba(0,0,0,0.2);
+  padding: 10px;
+  border-radius: 4px;
+  margin-bottom: 15px;
+  max-height: 150px;
+  overflow-y: auto;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.error-hint {
+  color: rgba(255,255,255,0.6);
+  font-size: 12px;
+  margin-bottom: 20px;
+}
+.error-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.copy-button, .retry-button {
+  background: rgba(255,255,255,0.2);
+  border: 1px solid rgba(255,255,255,0.3);
+  color: #fff;
+  padding: 10px 30px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s, border-color 0.2s;
+}
+.copy-button:hover, .retry-button:hover {
+  background: rgba(255,255,255,0.3);
+}
+.copy-button.copied {
+  background: rgba(76, 175, 80, 0.3);
+  border-color: rgba(76, 175, 80, 0.5);
+}
+

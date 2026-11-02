@@ -1,0 +1,2946 @@
+//! Management index module for scanning aircraft, plugins, and navdata
+//!
+//! This module provides scanning functionality for X-Plane add-ons
+//! to support the unified management UI.
+//!
+//! Enable/Disable mechanism:
+//! - Aircraft: Rename .acf <-> .xfma files (not scanning subdirectories)
+//! - Plugins: Rename .xpl <-> .xfmp files (including subdirectories)
+
+use crate::logger;
+use crate::models::{
+    AircraftAcfFileInfo, AircraftInfo, LiveryInfo, LuaScriptInfo, ManagementData,
+    NavdataBackupInfo, NavdataBackupVerification, NavdataManagerInfo, PluginInfo,
+    SceneryManagerEntry,
+};
+use crate::path_utils;
+use crate::skunk_updater;
+use crate::x_updater_profile::{
+    find_profile_in_folder, is_profile_file_name, tag_host_as_update_url, XUPDATER_URL_PREFIX,
+};
+use crate::zibo_updater;
+use anyhow::{anyhow, Result};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+
+const AIRCRAFT_ACF_STATE_FILE_NAME: &str = ".xfastmanager-acf-state.json";
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AircraftAcfState {
+    #[serde(default)]
+    disabled_stems: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly_attribute(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_readonly_attribute(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn add_write_permission(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    let mut mode = permissions.mode();
+
+    mode |= 0o200; // Ensure user write permission.
+    if metadata.is_dir() {
+        mode |= 0o100; // Ensure user execute permission for directories.
+    }
+
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)?;
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn add_write_permission(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn relax_permissions_recursive(path: &Path) -> Result<()> {
+    for entry in WalkDir::new(path).follow_links(false).into_iter().flatten() {
+        if entry.file_type().is_symlink() {
+            continue;
+        }
+
+        let entry_path = entry.path();
+        let _ = clear_readonly_attribute(entry_path);
+        let _ = add_write_permission(entry_path);
+    }
+
+    Ok(())
+}
+
+fn delete_permission_message(display_name: &str, error: &std::io::Error) -> String {
+    format!(
+        "Could not delete {}. The folder may still be in use by X-Plane, a file manager, antivirus, or another process, or your account may not have permission to modify it. Close anything using the folder, check folder permissions, then try again. Last error: {}",
+        display_name, error
+    )
+}
+
+fn remove_dir_all_with_permission_fix(path: &Path, display_name: &str) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            let _ = relax_permissions_recursive(path);
+            fs::remove_dir_all(path)
+                .map_err(|e2| anyhow!(delete_permission_message(display_name, &e2)))?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn remove_file_with_permission_fix(path: &Path, display_name: &str) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            let _ = clear_readonly_attribute(path);
+            let _ = add_write_permission(path);
+            fs::remove_file(path)
+                .map_err(|e2| anyhow!(delete_permission_message(display_name, &e2)))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn aircraft_acf_state_path(folder_path: &Path) -> PathBuf {
+    folder_path.join(AIRCRAFT_ACF_STATE_FILE_NAME)
+}
+
+fn normalize_aircraft_variant_stem(file_name: &str) -> Option<String> {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.trim().to_lowercase())
+        .filter(|stem| !stem.is_empty())
+}
+
+fn normalize_aircraft_variant_stem_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.trim().to_lowercase())
+        .filter(|stem| !stem.is_empty())
+}
+
+fn aircraft_variant_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.trim().to_lowercase())
+        .filter(|ext| ext == "acf" || ext == "xfma")
+}
+
+fn resolve_aircraft_variant_file(folder_path: &Path, file_name: &str) -> Result<PathBuf> {
+    if file_name.contains(['/', '\\']) {
+        return Err(anyhow!("Invalid aircraft file name"));
+    }
+
+    let requested_path = Path::new(file_name);
+    let requested_stem = normalize_aircraft_variant_stem(file_name)
+        .ok_or_else(|| anyhow!("Invalid aircraft file name"))?;
+    let requested_extension = requested_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.trim().to_lowercase());
+
+    if let Some(extension) = requested_extension.as_deref() {
+        if extension != "acf" && extension != "xfma" {
+            return Err(anyhow!(
+                "Unsupported aircraft file extension: {}",
+                extension
+            ));
+        }
+    }
+
+    let exact_path = folder_path.join(file_name);
+    if exact_path.is_file() {
+        aircraft_variant_extension(&exact_path)
+            .ok_or_else(|| anyhow!("Unsupported aircraft file extension: {}", file_name))?;
+        return Ok(exact_path);
+    }
+
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+    for entry in fs::read_dir(folder_path)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(stem) = normalize_aircraft_variant_stem_from_path(&path) else {
+            continue;
+        };
+        if stem != requested_stem {
+            continue;
+        }
+
+        let Some(extension) = aircraft_variant_extension(&path) else {
+            continue;
+        };
+        candidates.push((path, extension));
+    }
+
+    if candidates.is_empty() {
+        return Err(anyhow!("Aircraft file not found: {}", file_name));
+    }
+
+    if let Some(extension) = requested_extension.as_deref() {
+        let current_extension = if extension == "acf" { "xfma" } else { "acf" };
+        if let Some((path, _)) = candidates
+            .iter()
+            .find(|(_, candidate_extension)| candidate_extension == current_extension)
+        {
+            return Ok(path.clone());
+        }
+
+        if let Some((path, _)) = candidates
+            .iter()
+            .find(|(_, candidate_extension)| candidate_extension == extension)
+        {
+            return Ok(path.clone());
+        }
+    }
+
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0).0);
+    }
+
+    Err(anyhow!(
+        "Aircraft file state is ambiguous for variant: {}",
+        file_name
+    ))
+}
+
+fn read_aircraft_acf_state(folder_path: &Path) -> AircraftAcfState {
+    let state_path = aircraft_acf_state_path(folder_path);
+    let content = match fs::read_to_string(&state_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => return AircraftAcfState::default(),
+        Err(error) => {
+            logger::log_debug(
+                &format!(
+                    "Failed to read aircraft ACF state '{}': {}",
+                    state_path.display(),
+                    error
+                ),
+                Some("management"),
+                None,
+            );
+            return AircraftAcfState::default();
+        }
+    };
+
+    match serde_json::from_str::<AircraftAcfState>(&content) {
+        Ok(mut state) => {
+            state.disabled_stems.sort();
+            state.disabled_stems.dedup();
+            state
+        }
+        Err(error) => {
+            logger::log_debug(
+                &format!(
+                    "Failed to parse aircraft ACF state '{}': {}",
+                    state_path.display(),
+                    error
+                ),
+                Some("management"),
+                None,
+            );
+            AircraftAcfState::default()
+        }
+    }
+}
+
+fn write_aircraft_acf_state(folder_path: &Path, disabled_stems: &[String]) -> Result<()> {
+    let state_path = aircraft_acf_state_path(folder_path);
+    let mut normalized: Vec<String> = disabled_stems
+        .iter()
+        .filter_map(|stem| normalize_aircraft_variant_stem(stem))
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+
+    if normalized.is_empty() {
+        match fs::remove_file(&state_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    }
+
+    let content = serde_json::to_string_pretty(&AircraftAcfState {
+        disabled_stems: normalized,
+    })?;
+    fs::write(&state_path, content)?;
+    Ok(())
+}
+
+fn sync_aircraft_acf_state_for_selection(folder_path: &Path, entry: &AircraftInfo) -> Result<()> {
+    let enabled_count = entry.acf_files.iter().filter(|file| file.enabled).count();
+
+    if enabled_count == 0 || enabled_count == entry.acf_files.len() {
+        return write_aircraft_acf_state(folder_path, &[]);
+    }
+
+    let disabled_stems: Vec<String> = entry
+        .acf_files
+        .iter()
+        .filter(|file| !file.enabled)
+        .filter_map(|file| normalize_aircraft_variant_stem(&file.file_name))
+        .collect();
+
+    write_aircraft_acf_state(folder_path, &disabled_stems)
+}
+
+/// Validate a folder name to prevent path traversal and separator injection
+fn validate_folder_name(folder_name: &str) -> Result<()> {
+    if folder_name.is_empty()
+        || folder_name.contains("..")
+        || folder_name.contains('/')
+        || folder_name.contains('\\')
+    {
+        return Err(anyhow!("Invalid folder name"));
+    }
+    Ok(())
+}
+
+/// Resolve a management folder path with strict validation
+fn resolve_management_path(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+) -> Result<PathBuf> {
+    // folder_name can be a relative path for nested items (e.g. "LevelUp\737NG"
+    // for aircraft, "navigraph\navdata" for navdata). Only reject empty names
+    // and ".." components; the canonical path check below prevents traversal.
+    // Exception: navdata folder_name can be empty when cycle.json is directly
+    // in Custom Data/ (e.g. X-Plane 12 native navdata).
+    if folder_name.contains("..") {
+        return Err(anyhow!("Invalid folder name"));
+    }
+    if folder_name.is_empty() && item_type != "navdata" {
+        return Err(anyhow!("Invalid folder name"));
+    }
+
+    let base_path = match item_type {
+        "aircraft" => xplane_path.join("Aircraft"),
+        "plugin" => xplane_path.join("Resources").join("plugins"),
+        "navdata" => xplane_path.join("Custom Data"),
+        "scenery" => xplane_path.join("Custom Scenery"),
+        _ => return Err(anyhow!("Unknown item type: {}", item_type)),
+    };
+
+    let target_path = if folder_name.is_empty() {
+        base_path.clone()
+    } else {
+        base_path.join(folder_name)
+    };
+    if !target_path.exists() {
+        return Err(anyhow!("Folder not found: {}", folder_name));
+    }
+
+    if folder_name.is_empty() {
+        return Ok(target_path);
+    }
+
+    path_utils::validate_child_path(&base_path, &target_path)
+        .map_err(|e| anyhow!("Invalid path: {}", e))
+}
+
+fn directory_contains_cycle_json(path: &Path) -> bool {
+    WalkDir::new(path)
+        .follow_links(false)
+        .max_depth(10)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| {
+            entry.file_type().is_file() && entry.file_name().to_str() == Some("cycle.json")
+        })
+}
+
+fn should_preserve_root_navdata_entry(path: &Path, entry_name: &str) -> bool {
+    entry_name.eq_ignore_ascii_case("Backup_Data")
+        || entry_name.starts_with('.')
+        || entry_name.to_ascii_lowercase().starts_with("user_")
+        || (path.is_dir() && directory_contains_cycle_json(path))
+}
+
+fn delete_navdata_root_contents(custom_data_path: &Path) -> Result<()> {
+    let root_cycle_path = custom_data_path.join("cycle.json");
+    if !root_cycle_path.is_file() {
+        return Err(anyhow!("Root-level navdata not found"));
+    }
+
+    let entries = fs::read_dir(custom_data_path)
+        .map_err(|e| anyhow!("Failed to read Custom Data folder: {}", e))?;
+    let mut removed_any = false;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let entry_name = entry.file_name().to_string_lossy().to_string();
+
+        if should_preserve_root_navdata_entry(&path, &entry_name) {
+            continue;
+        }
+
+        if path.is_dir() {
+            remove_dir_all_with_permission_fix(&path, &entry_name)?;
+        } else {
+            remove_file_with_permission_fix(&path, &entry_name)?;
+        }
+        removed_any = true;
+    }
+
+    if !removed_any {
+        return Err(anyhow!("No removable root-level navdata files found"));
+    }
+
+    Ok(())
+}
+
+/// Scan aircraft in the X-Plane Aircraft folder
+pub fn scan_aircraft(xplane_path: &Path) -> Result<ManagementData<AircraftInfo>> {
+    let aircraft_path = xplane_path.join("Aircraft");
+    if !aircraft_path.exists() {
+        logger::log_info(
+            "Aircraft folder not found, returning empty aircraft list",
+            Some("management"),
+        );
+        return Ok(ManagementData {
+            entries: Vec::new(),
+            total_count: 0,
+            enabled_count: 0,
+        });
+    }
+
+    logger::log_info("Scanning aircraft folder...", Some("management"));
+
+    let mut entries: Vec<AircraftInfo> = Vec::new();
+
+    // Scan up to 3 levels deep for .acf or .xfma files
+    scan_aircraft_recursive(&aircraft_path, &aircraft_path, 0, 3, &mut entries)?;
+
+    // Sort by display name
+    entries.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
+
+    let total_count = entries.len();
+    let enabled_count = entries.iter().filter(|e| e.enabled).count();
+
+    logger::log_info(
+        &format!("Found {} aircraft ({} enabled)", total_count, enabled_count),
+        Some("management"),
+    );
+
+    Ok(ManagementData {
+        entries,
+        total_count,
+        enabled_count,
+    })
+}
+
+fn scan_aircraft_recursive(
+    base_path: &Path,
+    current_path: &Path,
+    depth: usize,
+    max_depth: usize,
+    entries: &mut Vec<AircraftInfo>,
+) -> Result<()> {
+    if depth > max_depth {
+        return Ok(());
+    }
+
+    let read_dir = match fs::read_dir(current_path) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(()),
+    };
+
+    // Collect subdirectories first
+    let mut subdirs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let folder_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        // Skip hidden folders
+        if folder_name.starts_with('.') {
+            continue;
+        }
+        subdirs.push((path, folder_name));
+    }
+
+    // Process subdirectories in parallel, each doing a single read_dir pass
+    let results: Vec<Option<AircraftInfo>> = subdirs
+        .par_iter()
+        .map(|(path, folder_name)| scan_single_aircraft_folder(path, base_path, folder_name))
+        .collect();
+
+    // Collect results and recurse for non-aircraft folders
+    let mut recurse_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for (i, result) in results.into_iter().enumerate() {
+        if let Some(info) = result {
+            entries.push(info);
+        } else {
+            recurse_dirs.push(subdirs[i].0.clone());
+        }
+    }
+
+    // Recurse in parallel to reduce scan latency for nested aircraft collections.
+    let nested_results: Result<Vec<Vec<AircraftInfo>>> = recurse_dirs
+        .par_iter()
+        .map(|dir| {
+            let mut nested_entries = Vec::new();
+            scan_aircraft_recursive(
+                base_path,
+                dir.as_path(),
+                depth + 1,
+                max_depth,
+                &mut nested_entries,
+            )?;
+            Ok(nested_entries)
+        })
+        .collect();
+
+    for mut nested in nested_results? {
+        entries.append(&mut nested);
+    }
+
+    Ok(())
+}
+
+/// Scan a single aircraft folder in one directory read pass.
+/// Returns Some(AircraftInfo) if it contains .acf/.xfma files, None otherwise.
+fn scan_single_aircraft_folder(
+    folder: &Path,
+    base_path: &Path,
+    folder_name: &str,
+) -> Option<AircraftInfo> {
+    let read_dir = fs::read_dir(folder).ok()?;
+
+    let mut acf_files: Vec<AircraftAcfFileInfo> = Vec::new();
+    let mut has_liveries = false;
+    let mut livery_count = 0;
+    let mut updater_cfg_path: Option<std::path::PathBuf> = None;
+    let mut version_file_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut has_xupdater_hints = false;
+
+    for entry in read_dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let name_lower = name.to_lowercase();
+
+        if ft.is_file() {
+            if name_lower.ends_with(".acf") || name_lower.ends_with(".xfma") {
+                acf_files.push(AircraftAcfFileInfo {
+                    file_name: name.clone(),
+                    enabled: name_lower.ends_with(".acf"),
+                });
+            }
+            // Check for version sources
+            if name_lower == "skunkcrafts_updater.cfg" {
+                updater_cfg_path = Some(entry.path());
+            } else if name_lower.contains("version")
+                || name_lower == "767.ini"
+                || name_lower == "757.ini"
+            {
+                version_file_paths.push(entry.path());
+            }
+            if !has_xupdater_hints && is_xupdater_hint_file_name(&name_lower) {
+                has_xupdater_hints = true;
+            }
+        } else if ft.is_dir() && name_lower == "liveries" {
+            // Count liveries
+            if let Ok(liveries_rd) = fs::read_dir(entry.path()) {
+                for lv_entry in liveries_rd.flatten() {
+                    if lv_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        livery_count += 1;
+                    }
+                }
+            }
+            has_liveries = livery_count > 0;
+        } else if ft.is_dir() && !has_xupdater_hints && is_xupdater_hint_dir_name(&name_lower) {
+            has_xupdater_hints = true;
+        }
+    }
+
+    if acf_files.is_empty() {
+        return None;
+    }
+
+    acf_files.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+
+    let enabled_count = acf_files.iter().filter(|file| file.enabled).count();
+    let enabled = enabled_count > 0;
+    let has_mixed_acf_states = enabled && enabled_count < acf_files.len();
+    let acf_name = acf_files
+        .iter()
+        .find(|file| file.enabled)
+        .or_else(|| acf_files.first())
+        .map(|file| file.file_name.clone())?;
+
+    let is_zibo = zibo_updater::is_zibo_aircraft(folder_name, &acf_name);
+    let (version, update_url, update_provider, cfg_disabled) = if is_zibo {
+        (
+            zibo_updater::read_local_version_for_scan(folder),
+            Some(zibo_updater::ZIBO_RSS_URL.to_string()),
+            Some(zibo_updater::ZIBO_PROVIDER.to_string()),
+            None,
+        )
+    } else {
+        // Read version info (priority: skunkcrafts_updater.cfg > version files)
+        let (mut version, mut update_url, cfg_disabled) =
+            read_version_from_paths(updater_cfg_path.as_deref(), &version_file_paths);
+        if update_url.is_none() && has_xupdater_hints {
+            if let Some(profile) = find_profile_in_folder(folder) {
+                update_url = Some(tag_host_as_update_url(&profile.host));
+                if version.is_none() {
+                    version = profile.version_label.clone();
+                }
+            }
+        }
+        let update_provider = update_url
+            .as_deref()
+            .map(detect_update_provider)
+            .map(str::to_string);
+        (version, update_url, update_provider, cfg_disabled)
+    };
+
+    let relative_path = folder
+        .strip_prefix(base_path)
+        .unwrap_or(folder)
+        .to_string_lossy()
+        .to_string();
+
+    Some(AircraftInfo {
+        folder_name: relative_path,
+        display_name: folder_name.to_string(),
+        acf_file: acf_name,
+        acf_files,
+        enabled,
+        has_mixed_acf_states,
+        has_liveries,
+        livery_count,
+        version,
+        update_url,
+        update_provider,
+        latest_version: None, // Will be populated by check_aircraft_updates
+        has_update: false,    // Will be set by check_aircraft_updates
+        cfg_disabled,
+    })
+}
+
+fn rescan_aircraft_folder_entry(xplane_path: &Path, folder_name: &str) -> Result<AircraftInfo> {
+    // Validate path (existence + traversal check). The canonical path it
+    // returns is intentionally discarded: scan_single_aircraft_folder derives
+    // the relative folder_name via strip_prefix against a non-canonical base,
+    // and on Windows a canonical path carries a `\\?\` prefix that breaks the
+    // match — the fallback would then return the full absolute path as
+    // folder_name, causing duplicate entries in the UI list after a toggle.
+    resolve_management_path(xplane_path, "aircraft", folder_name)?;
+
+    let aircraft_path = xplane_path.join("Aircraft");
+    let folder_path = aircraft_path.join(folder_name);
+    let display_name = folder_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("Invalid aircraft folder name: {}", folder_name))?;
+
+    scan_single_aircraft_folder(&folder_path, &aircraft_path, display_name)
+        .ok_or_else(|| anyhow!("Aircraft folder does not contain any .acf or .xfma files"))
+}
+
+pub fn get_aircraft_folder_state(xplane_path: &Path, folder_name: &str) -> Result<AircraftInfo> {
+    rescan_aircraft_folder_entry(xplane_path, folder_name)
+}
+
+/// Read version from already-discovered paths (avoids extra directory reads)
+/// Returns (version, update_url, cfg_disabled) tuple
+pub fn read_version_from_paths(
+    updater_cfg: Option<&Path>,
+    version_files: &[std::path::PathBuf],
+) -> (Option<String>, Option<String>, Option<bool>) {
+    let mut update_url: Option<String> = None;
+    let mut cfg_disabled: Option<bool> = None;
+
+    // First, try skunkcrafts_updater.cfg (higher priority)
+    if let Some(cfg_path) = updater_cfg {
+        if let Ok(content) = fs::read_to_string(cfg_path) {
+            let mut cfg_version: Option<String> = None;
+
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some((key, value_raw)) = line.split_once('|') {
+                    let value = value_raw.trim();
+                    if key.eq_ignore_ascii_case("version") {
+                        if !value.is_empty() {
+                            cfg_version = Some(value.to_string());
+                        }
+                    } else if key.eq_ignore_ascii_case("module") {
+                        if !value.is_empty() {
+                            update_url = Some(value.to_string());
+                        }
+                    } else if key.eq_ignore_ascii_case("disabled") {
+                        cfg_disabled = Some(value.eq_ignore_ascii_case("true") || value == "1");
+                    }
+                }
+            }
+
+            if cfg_version.is_some() {
+                return (cfg_version, update_url, cfg_disabled);
+            }
+        }
+    }
+
+    // Fall back to version files
+    let mut version_tokens: Vec<String> = Vec::new();
+    let mut seen_tokens: HashSet<String> = HashSet::new();
+    let mut first_line_fallback: Option<String> = None;
+
+    for path in version_files {
+        if let Ok(content) = fs::read_to_string(path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Record first non-empty line as fallback
+                if first_line_fallback.is_none() {
+                    first_line_fallback = Some(line.to_string());
+                }
+
+                if !has_version_pattern(line) {
+                    continue;
+                }
+                for token in line.split_whitespace() {
+                    if has_version_pattern(token) {
+                        let token_owned = token.to_string();
+                        if seen_tokens.insert(token_owned.clone()) {
+                            version_tokens.push(token_owned);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !version_tokens.is_empty() {
+        return (Some(version_tokens.join("/")), update_url, cfg_disabled);
+    }
+
+    // Fallback: try to parse pure digit string (e.g., "020310" -> "2.3.10")
+    if let Some(ref first_line) = first_line_fallback {
+        if let Some(parsed) = try_parse_digit_version(first_line) {
+            return (Some(parsed), update_url, cfg_disabled);
+        }
+        // Last resort: return the first line as-is
+        return (first_line_fallback, update_url, cfg_disabled);
+    }
+
+    (None, update_url, cfg_disabled)
+}
+
+fn detect_update_provider(update_url: &str) -> &'static str {
+    if is_x_updater_url(update_url) {
+        "x-updater"
+    } else {
+        "skunkcrafts"
+    }
+}
+
+/// Read version information from a folder (used by plugins where we don't have pre-collected paths)
+/// Returns (version, update_url, cfg_disabled) tuple
+pub fn read_version_info_with_url(folder: &Path) -> (Option<String>, Option<String>, Option<bool>) {
+    let read_dir = match fs::read_dir(folder) {
+        Ok(rd) => rd,
+        Err(_) => return (None, None, None),
+    };
+
+    let mut updater_cfg_path: Option<std::path::PathBuf> = None;
+    let mut version_file_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut has_xupdater_hints = false;
+
+    for entry in read_dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        if ft.is_dir() {
+            if !has_xupdater_hints && is_xupdater_hint_dir_name(&name) {
+                has_xupdater_hints = true;
+            }
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+
+        let name_lower = name.to_lowercase();
+        if name_lower == "skunkcrafts_updater.cfg" {
+            updater_cfg_path = Some(entry.path());
+        } else if name_lower.contains("version")
+            || name_lower == "767.ini"
+            || name_lower == "757.ini"
+        {
+            version_file_paths.push(entry.path());
+        }
+        if !has_xupdater_hints && is_xupdater_hint_file_name(&name_lower) {
+            has_xupdater_hints = true;
+        }
+    }
+
+    let (mut version, mut update_url, cfg_disabled) =
+        read_version_from_paths(updater_cfg_path.as_deref(), &version_file_paths);
+
+    if update_url.is_none() && has_xupdater_hints {
+        if let Some(profile) = find_profile_in_folder(folder) {
+            update_url = Some(tag_host_as_update_url(&profile.host));
+            if version.is_none() {
+                version = profile.version_label.clone();
+            }
+        }
+    }
+
+    (version, update_url, cfg_disabled)
+}
+
+/// Check if a string contains a version-like pattern (digit(s).digit(s))
+pub fn has_version_pattern(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < len && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < len && bytes[i] == b'.' && i > start {
+                i += 1;
+                if i < len && bytes[i].is_ascii_digit() {
+                    return true;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Try to parse a pure digit string as a version by splitting every 2 characters
+/// and removing leading zeros from each part.
+/// Example: "020310" -> "2.3.10"
+pub fn try_parse_digit_version(s: &str) -> Option<String> {
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+
+    // Must have at least 4 digits to split into meaningful parts
+    if digits.len() < 4 {
+        return None;
+    }
+
+    // Split every 2 characters
+    let parts: Vec<String> = digits
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let s = std::str::from_utf8(chunk).unwrap_or("0");
+            // Parse to remove leading zeros, then convert back to string
+            s.parse::<u32>().unwrap_or(0).to_string()
+        })
+        .collect();
+
+    // Must have at least 2 parts
+    if parts.len() < 2 {
+        return None;
+    }
+
+    Some(parts.join("."))
+}
+
+/// Scan plugins in the X-Plane Resources/plugins folder
+pub fn scan_plugins(xplane_path: &Path) -> Result<ManagementData<PluginInfo>> {
+    let plugins_path = xplane_path.join("Resources").join("plugins");
+    if !plugins_path.exists() {
+        return Err(anyhow!("Plugins folder not found"));
+    }
+
+    logger::log_info("Scanning plugins folder...", Some("management"));
+
+    // Collect plugin subdirectories
+    let mut subdirs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let read_dir = fs::read_dir(&plugins_path)?;
+    for entry in read_dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let folder_name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if folder_name.starts_with('.') {
+            continue;
+        }
+        subdirs.push((entry.path(), folder_name));
+    }
+
+    // Process plugin folders in parallel
+    let mut entries: Vec<PluginInfo> = subdirs
+        .par_iter()
+        .filter_map(|(path, folder_name)| scan_single_plugin_folder(path, folder_name))
+        .collect();
+
+    // Sort by display name
+    entries.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
+
+    let total_count = entries.len();
+    let enabled_count = entries.iter().filter(|e| e.enabled).count();
+
+    logger::log_info(
+        &format!("Found {} plugins ({} enabled)", total_count, enabled_count),
+        Some("management"),
+    );
+
+    Ok(ManagementData {
+        entries,
+        total_count,
+        enabled_count,
+    })
+}
+
+/// Scan a single plugin folder
+fn scan_single_plugin_folder(path: &Path, folder_name: &str) -> Option<PluginInfo> {
+    // Find .xpl and .xfmp files (including subdirectories)
+    let (xpl_files, xfmp_files) = find_xpl_and_xfmp_files(path);
+
+    // Skip if no plugin files found
+    if xpl_files.is_empty() && xfmp_files.is_empty() {
+        return None;
+    }
+
+    // Enabled if there are any .xpl files
+    let enabled = !xpl_files.is_empty();
+
+    let xfmp_as_xpl_files: Vec<String> = if enabled {
+        Vec::new()
+    } else {
+        xfmp_files
+            .iter()
+            .map(|f| f.replace(".xfmp", ".xpl"))
+            .collect()
+    };
+
+    // Determine platform from xpl file locations
+    let platform_source = if enabled {
+        &xpl_files
+    } else {
+        &xfmp_as_xpl_files
+    };
+    let platform = detect_plugin_platform(path, platform_source);
+
+    // Combine all files for display
+    let all_files: Vec<String> = if enabled {
+        xpl_files
+    } else {
+        xfmp_as_xpl_files
+    };
+
+    // Read version info with update URL
+    let (version, update_url, cfg_disabled) = read_version_info_with_url(path);
+    let update_provider = update_url
+        .as_deref()
+        .map(detect_update_provider)
+        .map(str::to_string);
+
+    // Detect FlyWithLua scripts (including Quarantined scripts)
+    let (has_scripts, script_count) = if folder_name.eq_ignore_ascii_case("FlyWithLua") {
+        let scripts_path = path.join("Scripts");
+        let quarantine_path = path.join("Scripts (Quarantine)");
+        let count_in_dir = |dir: &Path| -> usize {
+            if !dir.is_dir() {
+                return 0;
+            }
+            fs::read_dir(dir)
+                .ok()
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| {
+                            e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                                && e.path()
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .map(|ext| {
+                                        ext.eq_ignore_ascii_case("lua")
+                                            || ext.eq_ignore_ascii_case("xfml")
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let count = count_in_dir(&scripts_path) + count_in_dir(&quarantine_path);
+        (count > 0, count)
+    } else {
+        (false, 0)
+    };
+
+    Some(PluginInfo {
+        folder_name: folder_name.to_string(),
+        display_name: folder_name.to_string(),
+        xpl_files: all_files,
+        enabled,
+        platform,
+        version,
+        update_url,
+        update_provider,
+        latest_version: None, // Will be populated by check_plugins_updates
+        has_update: false,    // Will be set by check_plugins_updates
+        cfg_disabled,
+        has_scripts,
+        script_count,
+    })
+}
+
+/// Find .xpl and .xfmp files in a folder (including subdirectories)
+/// Returns (xpl_files, xfmp_files)
+fn find_xpl_and_xfmp_files(folder: &Path) -> (Vec<String>, Vec<String>) {
+    let mut xpl_files = Vec::new();
+    let mut xfmp_files = Vec::new();
+
+    for entry in WalkDir::new(folder)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !(name.starts_with('.') || name.as_ref().eq_ignore_ascii_case("__macosx"))
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let is_xpl = ext.eq_ignore_ascii_case("xpl");
+            let is_xfmp = ext.eq_ignore_ascii_case("xfmp");
+            if !is_xpl && !is_xfmp {
+                continue;
+            }
+
+            let relative_path = path
+                .strip_prefix(folder)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+
+            if is_xpl {
+                xpl_files.push(relative_path);
+            } else if is_xfmp {
+                xfmp_files.push(relative_path);
+            }
+        }
+    }
+
+    (xpl_files, xfmp_files)
+}
+
+fn is_xupdater_hint_dir_name(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "x-updater" | "x_updater" | "xupdater"
+    )
+}
+
+fn is_xupdater_hint_file_name(name: &str) -> bool {
+    if is_profile_file_name(name) {
+        return true;
+    }
+    matches!(
+        name,
+        "client-configuration"
+            | "productid"
+            | "xupdignore"
+            | "description.txt"
+            | "x-updater.log"
+            | "x-updater.log.1"
+            | "x-updater.log.2"
+    )
+}
+
+fn detect_plugin_platform(folder: &Path, xpl_files: &[String]) -> String {
+    let mut has_win = false;
+    let mut has_mac = false;
+    let mut has_lin = false;
+
+    for xpl_file in xpl_files {
+        let lower = xpl_file.to_lowercase();
+        if lower.contains("win") {
+            has_win = true;
+        }
+        if lower.contains("mac") {
+            has_mac = true;
+        }
+        if lower.contains("lin") {
+            has_lin = true;
+        }
+    }
+
+    // Check platform folders only if not already detected from file paths
+    if !has_win || !has_mac || !has_lin {
+        if let Ok(read_dir) = fs::read_dir(folder) {
+            for entry in read_dir.flatten() {
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if !ft.is_dir() {
+                    continue;
+                }
+                if let Ok(name) = entry.file_name().into_string() {
+                    let lower = name.to_lowercase();
+                    if lower == "win" || lower == "win_x64" {
+                        has_win = true;
+                    } else if lower == "mac" || lower == "mac_x64" {
+                        has_mac = true;
+                    } else if lower == "lin" || lower == "lin_x64" {
+                        has_lin = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let count = [has_win, has_mac, has_lin].iter().filter(|&&x| x).count();
+    if count >= 2 {
+        "multi".to_string()
+    } else if has_win {
+        "win".to_string()
+    } else if has_mac {
+        "mac".to_string()
+    } else if has_lin {
+        "lin".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Scan navdata in the X-Plane Custom Data folder
+pub fn scan_navdata(xplane_path: &Path) -> Result<ManagementData<NavdataManagerInfo>> {
+    let custom_data_path = xplane_path.join("Custom Data");
+    if !custom_data_path.exists() {
+        return Err(anyhow!("Custom Data folder not found"));
+    }
+
+    logger::log_info("Scanning navdata folder...", Some("management"));
+
+    let mut entries: Vec<NavdataManagerInfo> = Vec::new();
+
+    // Use WalkDir to efficiently find cycle.json files
+    // Skip Backup_Data folder (used for navdata backup/restore)
+    let backup_data_path = custom_data_path.join("Backup_Data");
+    for entry in WalkDir::new(&custom_data_path)
+        .max_depth(10)
+        .into_iter()
+        .filter_entry(|e| e.path() != backup_data_path)
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            if name.eq_ignore_ascii_case("cycle.json") {
+                let path = entry.path();
+                if let Some(parent) = path.parent() {
+                    if let Some(info) = parse_cycle_json(path, &custom_data_path, parent) {
+                        entries.push(info);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by provider name
+    entries.sort_by(|a, b| {
+        a.provider_name
+            .to_lowercase()
+            .cmp(&b.provider_name.to_lowercase())
+    });
+
+    let total_count = entries.len();
+    let enabled_count = entries.iter().filter(|e| e.enabled).count();
+
+    logger::log_info(
+        &format!(
+            "Found {} navdata entries ({} enabled)",
+            total_count, enabled_count
+        ),
+        Some("management"),
+    );
+
+    Ok(ManagementData {
+        entries,
+        total_count,
+        enabled_count,
+    })
+}
+
+fn parse_cycle_json(
+    cycle_json_path: &Path,
+    base_path: &Path,
+    parent_folder: &Path,
+) -> Option<NavdataManagerInfo> {
+    let content = fs::read_to_string(cycle_json_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let provider_name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
+    let cycle = json
+        .get("cycle")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let airac = json
+        .get("airac")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let folder_name = parent_folder
+        .strip_prefix(base_path)
+        .unwrap_or(parent_folder)
+        .to_string_lossy()
+        .to_string();
+
+    Some(NavdataManagerInfo {
+        folder_name,
+        provider_name,
+        cycle,
+        airac,
+        enabled: true, // Always enabled (toggle not supported)
+    })
+}
+
+/// Toggle enabled state for a management item
+/// - Aircraft: Rename .acf <-> .xfma files (not scanning subdirectories)
+/// - Plugins: Rename .xpl <-> .xfmp files (including subdirectories)
+pub fn toggle_management_item(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+) -> Result<bool> {
+    let current_path = resolve_management_path(xplane_path, item_type, folder_name)?;
+
+    match item_type {
+        "aircraft" => toggle_aircraft_files(&current_path, folder_name),
+        "plugin" => toggle_plugin_files(&current_path, folder_name),
+        _ => Err(anyhow!("Unknown item type: {}", item_type)),
+    }
+}
+
+pub fn toggle_aircraft_folder(xplane_path: &Path, folder_name: &str) -> Result<AircraftInfo> {
+    let folder_path = resolve_management_path(xplane_path, "aircraft", folder_name)?;
+    toggle_aircraft_files(&folder_path, folder_name)?;
+
+    let refreshed = rescan_aircraft_folder_entry(xplane_path, folder_name)?;
+    let aggregate_disabled = !refreshed.enabled;
+    set_cfg_disabled(xplane_path, "aircraft", folder_name, aggregate_disabled)?;
+    Ok(refreshed)
+}
+
+/// Toggle a specific aircraft model file: .acf <-> .xfma.
+pub fn toggle_aircraft_acf_file(
+    xplane_path: &Path,
+    folder_name: &str,
+    file_name: &str,
+) -> Result<AircraftInfo> {
+    let folder_path = resolve_management_path(xplane_path, "aircraft", folder_name)?;
+
+    let source_path = resolve_aircraft_variant_file(&folder_path, file_name)?;
+    let extension = aircraft_variant_extension(&source_path)
+        .ok_or_else(|| anyhow!("Aircraft file has no supported extension"))?;
+
+    let target_extension = if extension == "acf" {
+        "xfma"
+    } else if extension == "xfma" {
+        "acf"
+    } else {
+        return Err(anyhow!(
+            "Unsupported aircraft file extension: {}",
+            extension
+        ));
+    };
+
+    let target_path = source_path.with_extension(target_extension);
+    if target_path.exists() {
+        return Err(anyhow!(
+            "Cannot toggle aircraft file because target already exists: {}",
+            target_path.display()
+        ));
+    }
+
+    fs::rename(&source_path, &target_path)?;
+
+    let refreshed = rescan_aircraft_folder_entry(xplane_path, folder_name)?;
+    sync_aircraft_acf_state_for_selection(&folder_path, &refreshed)?;
+    let aggregate_disabled = !refreshed.enabled;
+    set_cfg_disabled(xplane_path, "aircraft", folder_name, aggregate_disabled)?;
+
+    logger::log_info(
+        &format!(
+            "Toggled aircraft file '{}::{}' to {}",
+            folder_name, file_name, target_extension
+        ),
+        Some("management"),
+    );
+
+    Ok(refreshed)
+}
+
+/// Toggle aircraft files: .acf <-> .xfma (only in the folder, not subdirectories)
+fn toggle_aircraft_files(folder_path: &Path, folder_name: &str) -> Result<bool> {
+    let read_dir = fs::read_dir(folder_path)?;
+
+    let mut acf_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut xfma_files: Vec<std::path::PathBuf> = Vec::new();
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        if let Some(ext) = path.extension() {
+            if ext.eq_ignore_ascii_case("acf") {
+                acf_files.push(path);
+            } else if ext.eq_ignore_ascii_case("xfma") {
+                xfma_files.push(path);
+            }
+        }
+    }
+
+    let new_enabled = if !acf_files.is_empty() {
+        let remembered_disabled_stems: Vec<String> = xfma_files
+            .iter()
+            .filter_map(|path| normalize_aircraft_variant_stem_from_path(path))
+            .collect();
+        write_aircraft_acf_state(folder_path, &remembered_disabled_stems)?;
+
+        // Currently enabled (has .acf files), disable by renaming to .xfma
+        for acf_path in &acf_files {
+            let new_path = acf_path.with_extension("xfma");
+            fs::rename(acf_path, &new_path)?;
+        }
+        logger::log_info(
+            &format!(
+                "Disabled aircraft '{}': renamed {} .acf file(s) to .xfma",
+                folder_name,
+                acf_files.len()
+            ),
+            Some("management"),
+        );
+        false
+    } else if !xfma_files.is_empty() {
+        let remembered_disabled: HashSet<String> = read_aircraft_acf_state(folder_path)
+            .disabled_stems
+            .into_iter()
+            .collect();
+
+        let mut files_to_enable: Vec<std::path::PathBuf> = xfma_files
+            .iter()
+            .filter(|path| {
+                normalize_aircraft_variant_stem_from_path(path)
+                    .map(|stem| {
+                        remembered_disabled.is_empty() || !remembered_disabled.contains(&stem)
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
+        let fallback_enable_all = files_to_enable.is_empty();
+        if fallback_enable_all {
+            files_to_enable = xfma_files.clone();
+        }
+
+        // Currently disabled (has .xfma files), enable remembered active files.
+        for xfma_path in &files_to_enable {
+            let new_path = xfma_path.with_extension("acf");
+            fs::rename(xfma_path, &new_path)?;
+        }
+
+        if fallback_enable_all || files_to_enable.len() == xfma_files.len() {
+            write_aircraft_acf_state(folder_path, &[])?;
+        } else {
+            let enabled_stems: HashSet<String> = files_to_enable
+                .iter()
+                .filter_map(|path| normalize_aircraft_variant_stem_from_path(path))
+                .collect();
+            let remaining_disabled_stems: Vec<String> = xfma_files
+                .iter()
+                .filter_map(|path| {
+                    let stem = normalize_aircraft_variant_stem_from_path(path)?;
+                    (!enabled_stems.contains(&stem)).then_some(stem)
+                })
+                .collect();
+            write_aircraft_acf_state(folder_path, &remaining_disabled_stems)?;
+        }
+
+        logger::log_info(
+            &format!(
+                "Enabled aircraft '{}': renamed {} .xfma file(s) to .acf",
+                folder_name,
+                files_to_enable.len()
+            ),
+            Some("management"),
+        );
+        true
+    } else {
+        return Err(anyhow!("No .acf or .xfma files found in aircraft folder"));
+    };
+
+    Ok(new_enabled)
+}
+
+/// Toggle plugin files: .xpl <-> .xfmp (including subdirectories)
+fn toggle_plugin_files(folder_path: &Path, folder_name: &str) -> Result<bool> {
+    let mut xpl_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut xfmp_files: Vec<std::path::PathBuf> = Vec::new();
+
+    // Use walkdir to find all .xpl and .xfmp files recursively
+    for entry in WalkDir::new(folder_path)
+        .max_depth(10)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        if let Some(ext) = path.extension() {
+            if ext.eq_ignore_ascii_case("xpl") {
+                xpl_files.push(path.to_path_buf());
+            } else if ext.eq_ignore_ascii_case("xfmp") {
+                xfmp_files.push(path.to_path_buf());
+            }
+        }
+    }
+
+    let new_enabled = if !xpl_files.is_empty() {
+        // Currently enabled (has .xpl files), disable by renaming to .xfmp
+        for xpl_path in &xpl_files {
+            let new_path = xpl_path.with_extension("xfmp");
+            fs::rename(xpl_path, &new_path)?;
+        }
+        logger::log_info(
+            &format!(
+                "Disabled plugin '{}': renamed {} .xpl file(s) to .xfmp",
+                folder_name,
+                xpl_files.len()
+            ),
+            Some("management"),
+        );
+        false
+    } else if !xfmp_files.is_empty() {
+        // Currently disabled (has .xfmp files), enable by renaming to .xpl
+        for xfmp_path in &xfmp_files {
+            let new_path = xfmp_path.with_extension("xpl");
+            fs::rename(xfmp_path, &new_path)?;
+        }
+        logger::log_info(
+            &format!(
+                "Enabled plugin '{}': renamed {} .xfmp file(s) to .xpl",
+                folder_name,
+                xfmp_files.len()
+            ),
+            Some("management"),
+        );
+        true
+    } else {
+        return Err(anyhow!("No .xpl or .xfmp files found in plugin folder"));
+    };
+
+    Ok(new_enabled)
+}
+
+/// Delete a management item folder
+pub fn delete_management_item(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+) -> Result<()> {
+    if item_type == "navdata" && folder_name.is_empty() {
+        let custom_data_path = xplane_path.join("Custom Data");
+        delete_navdata_root_contents(&custom_data_path)?;
+    } else {
+        let target_path = resolve_management_path(xplane_path, item_type, folder_name)?;
+        remove_dir_all_with_permission_fix(&target_path, folder_name)?;
+    }
+
+    logger::log_info(
+        &format!("Deleted {} folder: {}", item_type, folder_name),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Open a management item folder in the system file explorer
+pub fn open_management_folder(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+) -> Result<()> {
+    let target_path = resolve_management_path(xplane_path, item_type, folder_name)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&target_path)
+            .spawn()?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&target_path)
+            .spawn()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&target_path)
+            .spawn()?;
+    }
+
+    Ok(())
+}
+
+/// Open a livery folder in the system file explorer
+pub fn open_livery_folder(
+    xplane_path: &Path,
+    aircraft_folder: &str,
+    livery_folder: &str,
+) -> Result<()> {
+    if aircraft_folder.is_empty() || aircraft_folder.contains("..") {
+        return Err(anyhow!("Invalid aircraft folder name"));
+    }
+    validate_folder_name(livery_folder)?;
+
+    let aircraft_base = xplane_path.join("Aircraft");
+    let livery_path = aircraft_base
+        .join(aircraft_folder)
+        .join("liveries")
+        .join(livery_folder);
+
+    if !livery_path.exists() {
+        return Err(anyhow!("Livery folder not found: {}", livery_folder));
+    }
+
+    let canonical_target = path_utils::validate_child_path(&aircraft_base, &livery_path)
+        .map_err(|e| anyhow!("Invalid path: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&canonical_target)
+            .spawn()?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&canonical_target)
+            .spawn()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&canonical_target)
+            .spawn()?;
+    }
+
+    Ok(())
+}
+
+/// Check for aircraft updates by fetching remote skunkcrafts_updater.cfg files
+/// This function modifies the aircraft list in place, setting latest_version and has_update
+pub async fn check_aircraft_updates(
+    xplane_path: &Path,
+    aircraft: &mut [AircraftInfo],
+    beta_folders: &HashSet<String>,
+) {
+    use futures::future::join_all;
+
+    // Collect aircraft with update URLs
+    let update_tasks: Vec<_> = aircraft
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| {
+            a.update_url.as_ref().and_then(|url| {
+                if a.update_provider.as_deref() == Some(zibo_updater::ZIBO_PROVIDER)
+                    || is_x_updater_url(url)
+                {
+                    None
+                } else {
+                    let use_beta = beta_folders.contains(&a.folder_name);
+                    resolve_update_check_url(xplane_path, "aircraft", &a.folder_name, url, use_beta)
+                        .map(|resolved_url| (idx, resolved_url))
+                }
+            })
+        })
+        .collect();
+    let zibo_indices: Vec<usize> = aircraft
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, aircraft)| {
+            (aircraft.update_provider.as_deref() == Some(zibo_updater::ZIBO_PROVIDER))
+                .then_some(idx)
+        })
+        .collect();
+
+    if !update_tasks.is_empty() {
+        // Fetch all remote configs in parallel
+        let fetch_futures: Vec<_> = update_tasks
+            .iter()
+            .map(|(_, url)| fetch_remote_version(url.clone()))
+            .collect();
+
+        let results = join_all(fetch_futures).await;
+
+        // Update aircraft with results
+        for ((idx, _), result) in update_tasks.into_iter().zip(results) {
+            if let Some(remote_version) = result {
+                let local_version = aircraft[idx].version.as_deref().unwrap_or("");
+                aircraft[idx].latest_version = Some(remote_version.clone());
+                aircraft[idx].has_update = remote_version != local_version;
+            }
+        }
+    }
+
+    if !zibo_indices.is_empty() {
+        if let Ok(remote_release) = zibo_updater::fetch_latest_release(None).await {
+            let remote_version = remote_release.version_string();
+            for idx in zibo_indices {
+                aircraft[idx].latest_version = Some(remote_version.clone());
+                aircraft[idx].has_update = zibo_updater::should_offer_update(
+                    aircraft[idx].version.as_deref(),
+                    &remote_version,
+                );
+            }
+        }
+    }
+}
+
+/// Check for plugin updates by fetching remote skunkcrafts_updater.cfg files
+/// This function modifies the plugins list in place, setting latest_version and has_update
+pub async fn check_plugins_updates(
+    xplane_path: &Path,
+    plugins: &mut [PluginInfo],
+    beta_folders: &HashSet<String>,
+) {
+    use futures::future::join_all;
+
+    // Collect plugins with update URLs
+    let update_tasks: Vec<_> = plugins
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, p)| {
+            p.update_url.as_ref().and_then(|url| {
+                if is_x_updater_url(url) {
+                    None
+                } else {
+                    let use_beta = beta_folders.contains(&p.folder_name);
+                    resolve_update_check_url(xplane_path, "plugin", &p.folder_name, url, use_beta)
+                        .map(|resolved_url| (idx, resolved_url))
+                }
+            })
+        })
+        .collect();
+
+    if update_tasks.is_empty() {
+        return;
+    }
+
+    // Fetch all remote configs in parallel
+    let fetch_futures: Vec<_> = update_tasks
+        .iter()
+        .map(|(_, url)| fetch_remote_version(url.clone()))
+        .collect();
+
+    let results = join_all(fetch_futures).await;
+
+    // Update plugins with results
+    for ((idx, _), result) in update_tasks.into_iter().zip(results) {
+        if let Some(remote_version) = result {
+            let local_version = plugins[idx].version.as_deref().unwrap_or("");
+            plugins[idx].latest_version = Some(remote_version.clone());
+            plugins[idx].has_update = remote_version != local_version;
+        }
+    }
+}
+
+/// Check for scenery updates by fetching remote skunkcrafts_updater.cfg files.
+/// Modifies the entries slice in place, setting latest_version and has_update.
+pub async fn check_scenery_updates(
+    xplane_path: &Path,
+    scenery: &mut [SceneryManagerEntry],
+    beta_folders: &HashSet<String>,
+) {
+    use futures::future::join_all;
+
+    let update_tasks: Vec<_> = scenery
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            entry.update_url.as_ref().and_then(|url| {
+                if is_x_updater_url(url) {
+                    None
+                } else {
+                    let use_beta = beta_folders.contains(&entry.folder_name);
+                    resolve_update_check_url(
+                        xplane_path,
+                        "scenery",
+                        &entry.folder_name,
+                        url,
+                        use_beta,
+                    )
+                    .map(|resolved_url| (idx, resolved_url))
+                }
+            })
+        })
+        .collect();
+
+    if update_tasks.is_empty() {
+        return;
+    }
+
+    let fetch_futures: Vec<_> = update_tasks
+        .iter()
+        .map(|(_, url)| fetch_remote_version(url.clone()))
+        .collect();
+
+    let results = join_all(fetch_futures).await;
+
+    for ((idx, _), result) in update_tasks.into_iter().zip(results) {
+        if let Some(remote_version) = result {
+            let local_version = scenery[idx].version.as_deref().unwrap_or("");
+            scenery[idx].latest_version = Some(remote_version.clone());
+            scenery[idx].has_update = remote_version != local_version;
+        }
+    }
+}
+
+fn resolve_update_check_url(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+    fallback_url: &str,
+    use_beta: bool,
+) -> Option<String> {
+    let fallback = fallback_url.trim();
+    if fallback.is_empty() {
+        return None;
+    }
+
+    if !use_beta {
+        return Some(fallback.to_string());
+    }
+
+    let target_path = match resolve_management_path(xplane_path, item_type, folder_name) {
+        Ok(path) => path,
+        Err(error) => {
+            logger::log_debug(
+                &format!(
+                    "Failed to resolve addon path for beta update check {}:{}: {}",
+                    item_type, folder_name, error
+                ),
+                Some("management"),
+                None,
+            );
+            return Some(fallback.to_string());
+        }
+    };
+    match skunk_updater::resolve_local_module_url(&target_path, true) {
+        Ok(Some(module_url)) => Some(module_url),
+        Ok(None) => Some(fallback.to_string()),
+        Err(error) => {
+            logger::log_debug(
+                &format!(
+                    "Failed to resolve beta update URL for {}:{}: {}",
+                    item_type, folder_name, error
+                ),
+                Some("management"),
+                None,
+            );
+            Some(fallback.to_string())
+        }
+    }
+}
+
+/// Fetch remote version from skunkcrafts_updater.cfg
+async fn fetch_remote_version(base_url: String) -> Option<String> {
+    let url = format!("{}/skunkcrafts_updater.cfg", base_url.trim_end_matches('/'));
+
+    // Build client with system proxy support (reads from Windows system settings)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let response = client.get(&url).send().await.ok()?;
+
+    if !response.status().is_success() {
+        logger::log_debug(
+            &format!(
+                "Failed to fetch remote config: {} - {}",
+                url,
+                response.status()
+            ),
+            Some("management"),
+            None,
+        );
+        return None;
+    }
+
+    let content = response.text().await.ok()?;
+
+    // Parse version from config
+    for line in content.lines() {
+        let line = line.trim();
+        if line.to_lowercase().starts_with("version|") {
+            let parts: Vec<&str> = line.splitn(2, '|').collect();
+            if parts.len() == 2 {
+                let version = parts[1].trim();
+                if !version.is_empty() {
+                    return Some(version.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn is_x_updater_url(url: &str) -> bool {
+    url.to_lowercase()
+        .starts_with(&XUPDATER_URL_PREFIX.to_lowercase())
+}
+
+/// Set the disabled| field in skunkcrafts_updater.cfg for an aircraft or plugin
+/// If the cfg file doesn't exist, returns Ok without creating it
+pub fn set_cfg_disabled(
+    xplane_path: &Path,
+    item_type: &str,
+    folder_name: &str,
+    disabled: bool,
+) -> Result<()> {
+    let folder_path = resolve_management_path(xplane_path, item_type, folder_name)?;
+
+    let cfg_path = folder_path.join("skunkcrafts_updater.cfg");
+
+    // If cfg file doesn't exist, skip write per user preference
+    if !cfg_path.exists() {
+        logger::log_debug(
+            &format!(
+                "No skunkcrafts_updater.cfg found for {}, skipping disabled write",
+                folder_name
+            ),
+            Some("management"),
+            None,
+        );
+        return Ok(());
+    }
+
+    // Read the existing file
+    let content = fs::read_to_string(&cfg_path)?;
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+
+    // Find and update the disabled| line, or add it if not present
+    let disabled_value = if disabled { "true" } else { "false" };
+    let disabled_line = format!("disabled|{}", disabled_value);
+    let mut found = false;
+
+    for line in &mut lines {
+        if line.trim().to_lowercase().starts_with("disabled|") {
+            *line = disabled_line.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Add the disabled line at the end
+        lines.push(disabled_line);
+    }
+
+    // Write back to file
+    let new_content = lines.join("\n");
+    fs::write(&cfg_path, new_content)?;
+
+    logger::log_info(
+        &format!(
+            "Set disabled|{} in {} for {}",
+            disabled_value,
+            cfg_path.display(),
+            folder_name
+        ),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Scan navdata backups in Custom Data/Backup_Data folder
+pub fn scan_navdata_backups(xplane_path: &Path) -> Result<Vec<NavdataBackupInfo>> {
+    let backup_data_path = xplane_path.join("Custom Data").join("Backup_Data");
+
+    if !backup_data_path.exists() {
+        logger::log_debug(
+            "Backup_Data folder does not exist",
+            Some("management"),
+            None,
+        );
+        return Ok(Vec::new());
+    }
+
+    logger::log_info("Scanning navdata backups...", Some("management"));
+
+    let mut backups: Vec<NavdataBackupInfo> = Vec::new();
+
+    for entry in fs::read_dir(&backup_data_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let verification_path = path.join("verification.json");
+        if verification_path.exists() {
+            match fs::read_to_string(&verification_path) {
+                Ok(content) => match serde_json::from_str::<NavdataBackupVerification>(&content) {
+                    Ok(verification) => {
+                        let folder_name = entry.file_name().to_string_lossy().to_string();
+
+                        backups.push(NavdataBackupInfo {
+                            folder_name,
+                            verification,
+                        });
+                    }
+                    Err(e) => {
+                        logger::log_error(
+                            &format!("Failed to parse verification.json in {:?}: {}", path, e),
+                            Some("management"),
+                        );
+                    }
+                },
+                Err(e) => {
+                    logger::log_error(
+                        &format!("Failed to read verification.json in {:?}: {}", path, e),
+                        Some("management"),
+                    );
+                }
+            }
+        }
+    }
+
+    logger::log_info(
+        &format!("Found {} navdata backups", backups.len()),
+        Some("management"),
+    );
+
+    Ok(backups)
+}
+
+/// Restore navdata from backup (EXTREME PERFORMANCE OPTIMIZED)
+///
+/// Optimizations:
+/// - Removed pre-restore SHA-256 verification (checksum is empty string, size-only check)
+/// - Removed post-restore SHA-256 verification (fs::rename is atomic, data integrity guaranteed)
+/// - Uses optimized directory-level rename when possible
+pub fn restore_navdata_backup(xplane_path: &Path, backup_folder_name: &str) -> Result<()> {
+    let backup_path = xplane_path
+        .join("Custom Data")
+        .join("Backup_Data")
+        .join(backup_folder_name);
+
+    if !backup_path.exists() {
+        return Err(anyhow!("Backup folder not found: {}", backup_folder_name));
+    }
+
+    let verification_path = backup_path.join("verification.json");
+    if !verification_path.exists() {
+        return Err(anyhow!(
+            "verification.json not found in backup: {}",
+            backup_folder_name
+        ));
+    }
+
+    logger::log_info(
+        &format!("Restoring navdata backup: {}", backup_folder_name),
+        Some("management"),
+    );
+
+    // Step 1: Read verification file
+    let content = fs::read_to_string(&verification_path)?;
+    let verification: NavdataBackupVerification = serde_json::from_str(&content)?;
+
+    // Step 2: Verify backup file integrity (OPTIMIZED: size-only, single stat per file)
+    // Checksum is now empty string, so we only check existence and size
+    logger::log_info(
+        "Verifying backup integrity (size-only)...",
+        Some("management"),
+    );
+    for file_entry in &verification.files {
+        let file_path = backup_path.join(&file_entry.relative_path);
+        // OPTIMIZED: Use single fs::metadata() call instead of exists() + metadata()
+        match fs::metadata(&file_path) {
+            Ok(meta) => {
+                if meta.len() != file_entry.size {
+                    return Err(anyhow!(
+                        "Backup size mismatch for {}: expected {} bytes, got {} bytes",
+                        file_entry.relative_path,
+                        file_entry.size,
+                        meta.len()
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(anyhow!("Backup file missing: {}", file_entry.relative_path));
+            }
+        }
+    }
+
+    logger::log_info("Backup integrity verified (fast)", Some("management"));
+
+    // Step 3: Delete current files that will be restored (based on verification.files)
+    let custom_data = xplane_path.join("Custom Data");
+
+    // Collect top-level items to delete from the verification entries
+    let mut top_level_items: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for file_entry in &verification.files {
+        // Get the first path component
+        if let Some(first_component) = file_entry.relative_path.split('/').next() {
+            top_level_items.insert(first_component.to_string());
+        }
+    }
+
+    for item_name in &top_level_items {
+        let current_path = custom_data.join(item_name);
+        if current_path.exists() {
+            logger::log_info(
+                &format!("Removing current: {:?}", current_path),
+                Some("management"),
+            );
+            if current_path.is_dir() {
+                fs::remove_dir_all(&current_path)?;
+            } else {
+                fs::remove_file(&current_path)?;
+            }
+        }
+    }
+
+    // Step 4: Move files from backup to Custom Data (OPTIMIZED: directory-level rename)
+    logger::log_info("Restoring files from backup...", Some("management"));
+
+    // Optimized move_directory: tries directory-level rename first
+    fn move_directory_optimized(src: &Path, dst: &Path) -> Result<()> {
+        if src.is_dir() {
+            // Ensure parent of destination exists
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // Try direct directory rename first (O(1) operation on same filesystem)
+            match fs::rename(src, dst) {
+                Ok(()) => return Ok(()),
+                Err(_) => {
+                    // Cross-device link error, fall back to recursive approach
+                }
+            }
+
+            // Fallback: recursive copy + delete
+            fs::create_dir_all(dst)?;
+            for entry in fs::read_dir(src)? {
+                let entry = entry?;
+                let src_child = entry.path();
+                let dst_child = dst.join(entry.file_name());
+                move_directory_optimized(&src_child, &dst_child)?;
+            }
+            fs::remove_dir(src).ok();
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match fs::rename(src, dst) {
+                Ok(()) => {}
+                Err(_) => {
+                    fs::copy(src, dst)?;
+                    fs::remove_file(src).ok();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Move top-level items from backup to target (directory-level rename)
+    for item_name in &top_level_items {
+        let backup_item = backup_path.join(item_name);
+        let target_item = custom_data.join(item_name);
+        if backup_item.exists() {
+            move_directory_optimized(&backup_item, &target_item)?;
+        }
+    }
+
+    // Step 5: Verify restored files (OPTIMIZED: size-only, single stat per file)
+    // fs::rename is atomic on same filesystem, so if it succeeded, data is intact
+    logger::log_info("Verifying restored files (fast)...", Some("management"));
+    for file_entry in &verification.files {
+        let restored_path = custom_data.join(&file_entry.relative_path);
+        // OPTIMIZED: Use single fs::metadata() call instead of exists() + checksum
+        match fs::metadata(&restored_path) {
+            Ok(meta) => {
+                if meta.len() != file_entry.size {
+                    return Err(anyhow!(
+                        "Restore verification failed: size mismatch for {} (expected {}, got {})",
+                        file_entry.relative_path,
+                        file_entry.size,
+                        meta.len()
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(anyhow!(
+                    "Restore verification failed: file missing: {}",
+                    file_entry.relative_path
+                ));
+            }
+        }
+    }
+
+    // Step 6: Delete backup folder
+    logger::log_info(
+        &format!("Removing backup folder: {:?}", backup_path),
+        Some("management"),
+    );
+    fs::remove_dir_all(&backup_path)?;
+
+    logger::log_info(
+        &format!(
+            "Navdata backup restored successfully: {} files (extreme optimized)",
+            verification.file_count
+        ),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Find a livery icon file (*_icon11.png) in a livery folder.
+/// Priority: if a .cfg file exists whose stem + "_icon11.png" is present, use that.
+/// Otherwise fall back to any *_icon11.png file.
+fn find_livery_icon(livery_path: &Path) -> Option<String> {
+    let read_dir = fs::read_dir(livery_path).ok()?;
+
+    let mut cfg_stems: Vec<String> = Vec::new();
+    let mut fallback_icon: Option<String> = None;
+
+    for entry in read_dir.flatten() {
+        let is_file = match entry.file_type() {
+            Ok(ft) => ft.is_file(),
+            Err(_) => continue,
+        };
+        if !is_file {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let name_lower = name_str.to_lowercase();
+
+        if name_lower.ends_with(".cfg") {
+            let stem = &name_str[..name_str.len() - 4];
+            cfg_stems.push(stem.to_string());
+        }
+
+        if name_lower.ends_with("_icon11.png") && fallback_icon.is_none() {
+            fallback_icon = Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+
+    // Check if any cfg stem has a matching _icon11.png
+    for stem in &cfg_stems {
+        let icon_name = format!("{}_icon11.png", stem);
+        let icon_path = livery_path.join(&icon_name);
+        if icon_path.exists() {
+            return Some(icon_path.to_string_lossy().to_string());
+        }
+    }
+
+    fallback_icon
+}
+
+/// Get liveries for a specific aircraft
+pub fn get_aircraft_liveries(xplane_path: &Path, aircraft_folder: &str) -> Result<Vec<LiveryInfo>> {
+    // Validate aircraft_folder: reject empty and ".."
+    if aircraft_folder.is_empty() || aircraft_folder.contains("..") {
+        return Err(anyhow!("Invalid aircraft folder name"));
+    }
+
+    let aircraft_base = xplane_path.join("Aircraft");
+    let aircraft_path = aircraft_base.join(aircraft_folder);
+
+    if !aircraft_path.exists() {
+        return Err(anyhow!("Aircraft folder not found"));
+    }
+
+    // Canonical path check to prevent traversal
+    let canonical_aircraft = path_utils::validate_child_path(&aircraft_base, &aircraft_path)
+        .map_err(|e| anyhow!("Invalid aircraft path: {}", e))?;
+
+    let liveries_path = canonical_aircraft.join("liveries");
+    if !liveries_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut liveries: Vec<LiveryInfo> = Vec::new();
+
+    let read_dir = fs::read_dir(&liveries_path)
+        .map_err(|e| anyhow!("Failed to read liveries folder: {}", e))?;
+
+    for entry in read_dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+
+        let folder_name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        // Skip hidden folders
+        if folder_name.starts_with('.') {
+            continue;
+        }
+
+        let icon_path = find_livery_icon(&entry.path());
+
+        liveries.push(LiveryInfo {
+            display_name: folder_name.clone(),
+            folder_name,
+            icon_path,
+        });
+    }
+
+    // Sort by display name
+    liveries.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
+
+    logger::log_info(
+        &format!(
+            "Found {} liveries for aircraft '{}'",
+            liveries.len(),
+            aircraft_folder
+        ),
+        Some("management"),
+    );
+
+    Ok(liveries)
+}
+
+/// Delete a specific livery from an aircraft
+pub fn delete_aircraft_livery(
+    xplane_path: &Path,
+    aircraft_folder: &str,
+    livery_folder: &str,
+) -> Result<()> {
+    // Validate aircraft_folder: reject empty and ".."
+    if aircraft_folder.is_empty() || aircraft_folder.contains("..") {
+        return Err(anyhow!("Invalid aircraft folder name"));
+    }
+
+    // Validate livery_folder: single segment, no path separators
+    validate_folder_name(livery_folder)?;
+
+    let aircraft_base = xplane_path.join("Aircraft");
+    let aircraft_path = aircraft_base.join(aircraft_folder);
+
+    if !aircraft_path.exists() {
+        return Err(anyhow!("Aircraft folder not found"));
+    }
+
+    let liveries_path = aircraft_path.join("liveries");
+    let livery_path = liveries_path.join(livery_folder);
+
+    if !livery_path.exists() {
+        return Err(anyhow!("Livery folder not found: {}", livery_folder));
+    }
+
+    // Canonical path check to ensure livery is under the liveries directory
+    let canonical_livery = path_utils::validate_child_path(&liveries_path, &livery_path)
+        .map_err(|e| anyhow!("Invalid livery path: {}", e))?;
+
+    remove_dir_all_with_permission_fix(&canonical_livery, livery_folder)
+        .map_err(|e| anyhow!("Failed to delete livery: {}", e))?;
+
+    logger::log_info(
+        &format!(
+            "Deleted livery '{}' from aircraft '{}'",
+            livery_folder, aircraft_folder
+        ),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Scan FlyWithLua scripts in the Scripts directory
+pub fn scan_lua_scripts(xplane_path: &Path) -> Result<Vec<LuaScriptInfo>> {
+    let fwl_base = xplane_path
+        .join("Resources")
+        .join("plugins")
+        .join("FlyWithLua");
+    let scripts_path = fwl_base.join("Scripts");
+    let quarantine_path = fwl_base.join("Scripts (Quarantine)");
+
+    if !scripts_path.exists() && !quarantine_path.exists() {
+        return Err(anyhow!("FlyWithLua Scripts folder not found"));
+    }
+
+    logger::log_info("Scanning FlyWithLua scripts...", Some("management"));
+
+    let mut scripts: Vec<LuaScriptInfo> = Vec::new();
+
+    let mut scan_dir = |dir_path: &Path, is_quarantined: bool| {
+        if !dir_path.is_dir() {
+            return;
+        }
+        if let Ok(read_dir) = fs::read_dir(dir_path) {
+            for entry in read_dir.flatten() {
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if !ft.is_file() {
+                    continue;
+                }
+
+                let path = entry.path();
+                let ext = match path.extension().and_then(|e| e.to_str()) {
+                    Some(ext) => ext.to_lowercase(),
+                    None => continue,
+                };
+
+                let enabled = match ext.as_str() {
+                    "lua" => !is_quarantined,
+                    "xfml" => false,
+                    _ => continue,
+                };
+
+                let file_name = match entry.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+
+                let display_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&file_name)
+                    .to_string();
+
+                scripts.push(LuaScriptInfo {
+                    file_name,
+                    display_name,
+                    enabled,
+                    quarantined: is_quarantined,
+                });
+            }
+        }
+    };
+
+    scan_dir(&scripts_path, false);
+    scan_dir(&quarantine_path, true);
+
+    // Sort quarantined scripts first, then by display_name case-insensitive
+    scripts.sort_by(|a, b| {
+        b.quarantined.cmp(&a.quarantined).then_with(|| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        })
+    });
+
+    logger::log_info(
+        &format!("Found {} FlyWithLua scripts", scripts.len()),
+        Some("management"),
+    );
+
+    Ok(scripts)
+}
+
+/// Toggle a FlyWithLua script: .lua <-> .xfml
+/// Returns the new enabled state (true = .lua, false = .xfml)
+pub fn toggle_lua_script(xplane_path: &Path, file_name: &str) -> Result<bool> {
+    // Validate file_name
+    if file_name.is_empty()
+        || file_name.contains("..")
+        || file_name.contains('/')
+        || file_name.contains('\\')
+    {
+        return Err(anyhow!("Invalid file name"));
+    }
+
+    let scripts_path = xplane_path
+        .join("Resources")
+        .join("plugins")
+        .join("FlyWithLua")
+        .join("Scripts");
+
+    if !scripts_path.exists() {
+        return Err(anyhow!("FlyWithLua Scripts folder not found"));
+    }
+
+    let file_path = scripts_path.join(file_name);
+    if !file_path.exists() {
+        return Err(anyhow!("Script file not found: {}", file_name));
+    }
+
+    // Canonical path check to ensure file is within Scripts dir
+    let canonical_file = path_utils::validate_child_path(&scripts_path, &file_path)
+        .map_err(|e| anyhow!("Invalid file path: {}", e))?;
+
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let new_enabled = match ext.as_str() {
+        "lua" => {
+            // Disable: rename .lua -> .xfml
+            let new_path = file_path.with_extension("xfml");
+            fs::rename(&canonical_file, &new_path)
+                .map_err(|e| anyhow!("Failed to rename script: {}", e))?;
+            logger::log_info(
+                &format!("Disabled script: {} -> .xfml", file_name),
+                Some("management"),
+            );
+            false
+        }
+        "xfml" => {
+            // Enable: rename .xfml -> .lua
+            let new_path = file_path.with_extension("lua");
+            fs::rename(&canonical_file, &new_path)
+                .map_err(|e| anyhow!("Failed to rename script: {}", e))?;
+            logger::log_info(
+                &format!("Enabled script: {} -> .lua", file_name),
+                Some("management"),
+            );
+            true
+        }
+        _ => return Err(anyhow!("Unsupported file extension: {}", ext)),
+    };
+
+    Ok(new_enabled)
+}
+
+/// Delete a FlyWithLua script file (from Scripts or Scripts (Quarantine))
+pub fn delete_lua_script(xplane_path: &Path, file_name: &str) -> Result<()> {
+    // Validate file_name
+    if file_name.is_empty()
+        || file_name.contains("..")
+        || file_name.contains('/')
+        || file_name.contains('\\')
+    {
+        return Err(anyhow!("Invalid file name"));
+    }
+
+    let fwl_base = xplane_path
+        .join("Resources")
+        .join("plugins")
+        .join("FlyWithLua");
+    let scripts_path = fwl_base.join("Scripts");
+    let quarantine_path = fwl_base.join("Scripts (Quarantine)");
+
+    let (parent_dir, file_path) = if scripts_path.join(file_name).exists() {
+        (scripts_path, fwl_base.join("Scripts").join(file_name))
+    } else if quarantine_path.join(file_name).exists() {
+        (
+            quarantine_path,
+            fwl_base.join("Scripts (Quarantine)").join(file_name),
+        )
+    } else {
+        return Err(anyhow!("Script file not found: {}", file_name));
+    };
+
+    // Canonical path check to ensure file is within parent_dir
+    let canonical_file = path_utils::validate_child_path(&parent_dir, &file_path)
+        .map_err(|e| anyhow!("Invalid file path: {}", e))?;
+
+    // Verify it's a script file (.lua or .xfml)
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    if ext != "lua" && ext != "xfml" {
+        return Err(anyhow!("Not a script file: {}", file_name));
+    }
+
+    fs::remove_file(&canonical_file).map_err(|e| anyhow!("Failed to delete script: {}", e))?;
+
+    logger::log_info(
+        &format!("Deleted script: {}", file_name),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Restore a single quarantined FlyWithLua script back to the active Scripts folder
+pub fn restore_quarantined_lua_script(xplane_path: &Path, file_name: &str) -> Result<()> {
+    if file_name.is_empty()
+        || file_name.contains("..")
+        || file_name.contains('/')
+        || file_name.contains('\\')
+    {
+        return Err(anyhow!("Invalid file name"));
+    }
+
+    let fwl_base = xplane_path
+        .join("Resources")
+        .join("plugins")
+        .join("FlyWithLua");
+    let scripts_path = fwl_base.join("Scripts");
+    let quarantine_path = fwl_base.join("Scripts (Quarantine)");
+
+    if !quarantine_path.exists() {
+        return Err(anyhow!("FlyWithLua Quarantine folder not found"));
+    }
+
+    let source_path = quarantine_path.join(file_name);
+    if !source_path.exists() {
+        return Err(anyhow!("Quarantined script not found: {}", file_name));
+    }
+
+    let canonical_source = path_utils::validate_child_path(&quarantine_path, &source_path)
+        .map_err(|e| anyhow!("Invalid file path: {}", e))?;
+
+    if !scripts_path.exists() {
+        fs::create_dir_all(&scripts_path)
+            .map_err(|e| anyhow!("Failed to create Scripts folder: {}", e))?;
+    }
+
+    let target_path = scripts_path.join(file_name);
+    fs::rename(&canonical_source, &target_path)
+        .map_err(|e| anyhow!("Failed to restore quarantined script: {}", e))?;
+
+    logger::log_info(
+        &format!("Restored quarantined script: {}", file_name),
+        Some("management"),
+    );
+
+    Ok(())
+}
+
+/// Restore all quarantined FlyWithLua scripts back to the active Scripts folder
+pub fn restore_all_quarantined_lua_scripts(xplane_path: &Path) -> Result<usize> {
+    let fwl_base = xplane_path
+        .join("Resources")
+        .join("plugins")
+        .join("FlyWithLua");
+    let scripts_path = fwl_base.join("Scripts");
+    let quarantine_path = fwl_base.join("Scripts (Quarantine)");
+
+    if !quarantine_path.is_dir() {
+        return Ok(0);
+    }
+
+    if !scripts_path.exists() {
+        fs::create_dir_all(&scripts_path)
+            .map_err(|e| anyhow!("Failed to create Scripts folder: {}", e))?;
+    }
+
+    let mut restored_count = 0usize;
+    let read_dir = fs::read_dir(&quarantine_path)
+        .map_err(|e| anyhow!("Failed to read Quarantine folder: {}", e))?;
+
+    for entry in read_dir.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !ext.eq_ignore_ascii_case("lua") && !ext.eq_ignore_ascii_case("xfml") {
+            continue;
+        }
+        let Ok(file_name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let target_path = scripts_path.join(&file_name);
+        if fs::rename(&path, &target_path).is_ok() {
+            restored_count += 1;
+        }
+    }
+
+    logger::log_info(
+        &format!("Restored {} quarantined FlyWithLua scripts", restored_count),
+        Some("management"),
+    );
+
+    Ok(restored_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        delete_management_item, remove_dir_all_with_permission_fix, resolve_management_path,
+        scan_aircraft, scan_navdata, toggle_aircraft_acf_file, toggle_management_item,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn scan_aircraft_returns_empty_when_aircraft_folder_is_missing() {
+        let temp = tempdir().expect("failed to create tempdir");
+
+        let result = scan_aircraft(temp.path()).expect("scan_aircraft should not fail");
+
+        assert!(result.entries.is_empty());
+        assert_eq!(result.total_count, 0);
+        assert_eq!(result.enabled_count, 0);
+    }
+
+    #[test]
+    fn scan_aircraft_reports_multiple_acf_files_and_mixed_state() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.xfma"), "xfma").expect("failed to write xfma");
+
+        let result = scan_aircraft(temp.path()).expect("scan_aircraft should not fail");
+        let entry = result.entries.first().expect("expected aircraft entry");
+
+        assert_eq!(entry.acf_files.len(), 2);
+        assert!(entry.enabled);
+        assert!(entry.has_mixed_acf_states);
+    }
+
+    #[test]
+    fn toggle_aircraft_acf_file_updates_partial_state() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.acf"), "acf")
+            .expect("failed to write second acf");
+
+        let entry = toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane_cargo.acf")
+            .expect("toggle_aircraft_acf_file should succeed");
+
+        assert!(aircraft_dir.join("DemoPlane_cargo.xfma").exists());
+        assert!(entry.enabled);
+        assert!(entry.has_mixed_acf_states);
+    }
+
+    #[test]
+    fn toggle_aircraft_acf_file_uses_current_state_when_filename_is_stale() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.acf"), "acf")
+            .expect("failed to write second acf");
+
+        toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane_cargo.acf")
+            .expect("first toggle should disable cargo variant");
+        let entry = toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane_cargo.acf")
+            .expect("stale ACF file name should resolve by variant stem");
+
+        assert!(aircraft_dir.join("DemoPlane_cargo.acf").exists());
+        assert!(entry
+            .acf_files
+            .iter()
+            .any(|file| file.file_name == "DemoPlane_cargo.acf" && file.enabled));
+        assert!(entry.enabled);
+        assert!(!entry.has_mixed_acf_states);
+    }
+
+    #[test]
+    fn toggle_aircraft_acf_file_preserves_skunkcrafts_cfg_content() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        let cfg_path = aircraft_dir.join("skunkcrafts_updater.cfg");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.acf"), "acf")
+            .expect("failed to write second acf");
+        fs::write(
+            &cfg_path,
+            "module|https://example.test/updates\nversion|1.0.0\ncustom|keep-me\ndisabled|false\n",
+        )
+        .expect("failed to write cfg");
+
+        toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane_cargo.acf")
+            .expect("toggle_aircraft_acf_file should succeed");
+
+        let content = fs::read_to_string(cfg_path).expect("failed to read cfg");
+        assert!(content.contains("module|https://example.test/updates"));
+        assert!(content.contains("version|1.0.0"));
+        assert!(content.contains("custom|keep-me"));
+        assert!(content.contains("disabled|false"));
+    }
+
+    #[test]
+    fn master_toggle_restores_partial_acf_selection() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.xfma"), "xfma").expect("failed to write xfma");
+
+        let disabled = toggle_management_item(temp.path(), "aircraft", "DemoPlane")
+            .expect("toggle_management_item should disable aircraft");
+        assert!(!disabled);
+        assert!(aircraft_dir.join("DemoPlane.xfma").exists());
+        assert!(aircraft_dir.join("DemoPlane_cargo.xfma").exists());
+
+        let enabled = toggle_management_item(temp.path(), "aircraft", "DemoPlane")
+            .expect("toggle_management_item should enable aircraft");
+        assert!(enabled);
+
+        let result = scan_aircraft(temp.path()).expect("scan_aircraft should not fail");
+        let entry = result.entries.first().expect("expected aircraft entry");
+        assert!(aircraft_dir.join("DemoPlane.acf").exists());
+        assert!(aircraft_dir.join("DemoPlane_cargo.xfma").exists());
+        assert!(entry.enabled);
+        assert!(entry.has_mixed_acf_states);
+    }
+
+    #[test]
+    fn master_toggle_enables_all_after_all_acfs_were_disabled_individually() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let aircraft_dir = temp.path().join("Aircraft").join("DemoPlane");
+        fs::create_dir_all(&aircraft_dir).expect("failed to create aircraft dir");
+        fs::write(aircraft_dir.join("DemoPlane.acf"), "acf").expect("failed to write acf");
+        fs::write(aircraft_dir.join("DemoPlane_cargo.acf"), "acf")
+            .expect("failed to write second acf");
+
+        let first = toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane.acf")
+            .expect("first ACF toggle should succeed");
+        assert!(first.enabled);
+        assert!(first.has_mixed_acf_states);
+
+        let second = toggle_aircraft_acf_file(temp.path(), "DemoPlane", "DemoPlane_cargo.acf")
+            .expect("second ACF toggle should succeed");
+        assert!(!second.enabled);
+        assert!(!second.has_mixed_acf_states);
+        assert!(aircraft_dir.join("DemoPlane.xfma").exists());
+        assert!(aircraft_dir.join("DemoPlane_cargo.xfma").exists());
+
+        let enabled = toggle_management_item(temp.path(), "aircraft", "DemoPlane")
+            .expect("toggle_management_item should enable all aircraft files");
+        assert!(enabled);
+
+        let result = scan_aircraft(temp.path()).expect("scan_aircraft should not fail");
+        let entry = result.entries.first().expect("expected aircraft entry");
+        assert!(aircraft_dir.join("DemoPlane.acf").exists());
+        assert!(aircraft_dir.join("DemoPlane_cargo.acf").exists());
+        assert!(entry.enabled);
+        assert!(!entry.has_mixed_acf_states);
+    }
+
+    #[test]
+    fn remove_dir_all_with_permission_fix_removes_readonly_tree() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let target = temp.path().join("LockedAddon");
+        let nested = target.join("Resources");
+        let file_path = nested.join("data.txt");
+        fs::create_dir_all(&nested).expect("failed to create nested dir");
+        fs::write(&file_path, "locked").expect("failed to write file");
+
+        let mut file_permissions = fs::metadata(&file_path)
+            .expect("failed to stat file")
+            .permissions();
+        file_permissions.set_readonly(true);
+        fs::set_permissions(&file_path, file_permissions).expect("failed to set readonly file");
+
+        let mut dir_permissions = fs::metadata(&nested)
+            .expect("failed to stat dir")
+            .permissions();
+        dir_permissions.set_readonly(true);
+        fs::set_permissions(&nested, dir_permissions).expect("failed to set readonly dir");
+
+        remove_dir_all_with_permission_fix(&target, "LockedAddon")
+            .expect("readonly tree should be removable");
+
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn resolve_management_path_allows_root_and_nested_navdata_entries() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let custom_data = temp.path().join("Custom Data");
+        let nested_navdata = custom_data.join("GNS430").join("navdata");
+        fs::create_dir_all(&nested_navdata).expect("failed to create nested navdata dir");
+
+        let root = resolve_management_path(temp.path(), "navdata", "")
+            .expect("root navdata path should resolve");
+        let nested = resolve_management_path(temp.path(), "navdata", "GNS430/navdata")
+            .expect("nested navdata path should resolve");
+
+        assert_eq!(root, custom_data);
+        assert_eq!(
+            nested,
+            nested_navdata.canonicalize().expect("canonical nested")
+        );
+    }
+
+    #[test]
+    fn delete_management_item_root_navdata_preserves_other_providers_and_backups() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let custom_data = temp.path().join("Custom Data");
+        let root_cifp = custom_data.join("CIFP");
+        let nested_gns430 = custom_data.join("GNS430").join("navdata");
+        let backup_dir = custom_data.join("Backup_Data").join("old_backup");
+
+        fs::create_dir_all(&root_cifp).expect("failed to create CIFP dir");
+        fs::create_dir_all(&nested_gns430).expect("failed to create nested navdata dir");
+        fs::create_dir_all(&backup_dir).expect("failed to create backup dir");
+
+        fs::write(
+            custom_data.join("cycle.json"),
+            r#"{"name":"X-Plane Navdata"}"#,
+        )
+        .expect("failed to write root cycle");
+        fs::write(custom_data.join("earth_nav.dat"), "nav").expect("failed to write nav file");
+        fs::write(custom_data.join("user_fix.dat"), "user").expect("failed to write user file");
+        fs::write(root_cifp.join("KSEA.dat"), "cifp").expect("failed to write CIFP file");
+        fs::write(
+            nested_gns430.join("cycle.json"),
+            r#"{"name":"GNS430 Navdata"}"#,
+        )
+        .expect("failed to write nested cycle");
+        fs::write(backup_dir.join("verification.json"), "{}").expect("failed to write backup");
+
+        delete_management_item(temp.path(), "navdata", "")
+            .expect("root navdata delete should succeed");
+
+        assert!(!custom_data.join("cycle.json").exists());
+        assert!(!custom_data.join("earth_nav.dat").exists());
+        assert!(!root_cifp.exists());
+        assert!(custom_data.join("user_fix.dat").exists());
+        assert!(nested_gns430.join("cycle.json").exists());
+        assert!(backup_dir.join("verification.json").exists());
+
+        let navdata = scan_navdata(temp.path()).expect("navdata scan should succeed");
+        assert_eq!(navdata.entries.len(), 1);
+        assert_eq!(
+            navdata.entries[0].folder_name.replace('\\', "/"),
+            "GNS430/navdata"
+        );
+    }
+
+    #[test]
+    fn delete_management_item_nested_navdata_only_removes_target_folder() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let custom_data = temp.path().join("Custom Data");
+        let nested_gns430 = custom_data.join("GNS430").join("navdata");
+
+        fs::create_dir_all(&nested_gns430).expect("failed to create nested navdata dir");
+        fs::write(
+            custom_data.join("cycle.json"),
+            r#"{"name":"X-Plane Navdata"}"#,
+        )
+        .expect("failed to write root cycle");
+        fs::write(
+            nested_gns430.join("cycle.json"),
+            r#"{"name":"GNS430 Navdata"}"#,
+        )
+        .expect("failed to write nested cycle");
+
+        delete_management_item(temp.path(), "navdata", "GNS430/navdata")
+            .expect("nested navdata delete should succeed");
+
+        assert!(custom_data.join("cycle.json").exists());
+        assert!(!nested_gns430.exists());
+    }
+}

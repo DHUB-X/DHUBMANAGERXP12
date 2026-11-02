@@ -1,0 +1,2762 @@
+use anyhow::{Context, Result};
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use crate::archive_input::{detect_archive_format, prepare_archive_for_read, ArchiveFormat};
+use crate::livery_patterns;
+use crate::logger;
+use crate::models::{
+    AddonType, DetectedItem, ExtractionChain, NavdataCycle, NavdataInfo, NestedArchiveInfo,
+};
+
+#[path = "rar.rs"]
+mod rar;
+#[path = "sevenz.rs"]
+mod sevenz;
+#[path = "zip.rs"]
+mod zip;
+
+/// Error indicating that password is required for an encrypted archive
+#[derive(Debug)]
+pub struct PasswordRequiredError {
+    pub archive_path: String,
+}
+
+impl std::fmt::Display for PasswordRequiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Password required for archive: {}", self.archive_path)
+    }
+}
+
+impl std::error::Error for PasswordRequiredError {}
+
+/// Error indicating that password is required for a nested archive
+#[derive(Debug)]
+pub struct NestedPasswordRequiredError {
+    pub parent_archive: String,
+    pub nested_archive: String,
+}
+
+impl std::fmt::Display for NestedPasswordRequiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Password required for nested archive: {} inside {}",
+            self.nested_archive, self.parent_archive
+        )
+    }
+}
+
+impl std::error::Error for NestedPasswordRequiredError {}
+
+/// Context for nested archive scanning
+pub(super) struct ScanContext {
+    /// Current nesting depth (0 = top level, 1 = nested once, 2 = max)
+    depth: u8,
+    /// Maximum allowed depth (2 levels: archive → archive → addon)
+    max_depth: u8,
+    /// Chain of parent archives (for building ExtractionChain)
+    parent_chain: Vec<NestedArchiveInfo>,
+    /// Password map for archives (key: archive path, value: password)
+    passwords: HashMap<String, String>,
+}
+
+impl ScanContext {
+    fn new() -> Self {
+        Self {
+            depth: 0,
+            max_depth: 2,
+            parent_chain: Vec::new(),
+            passwords: HashMap::new(),
+        }
+    }
+
+    fn can_recurse(&self) -> bool {
+        self.depth < self.max_depth
+    }
+
+    fn is_nested_archive_scan(&self) -> bool {
+        !self.parent_chain.is_empty()
+    }
+
+    fn push_archive(&mut self, info: NestedArchiveInfo) {
+        self.parent_chain.push(info);
+        self.depth += 1;
+    }
+
+    fn pop_archive(&mut self) {
+        self.parent_chain.pop();
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// Get password for a nested archive by checking the password map
+    /// Tries multiple key formats: full path, nested path, and filename
+    fn get_nested_password(&self, parent_path: &str, nested_path: &str) -> Option<String> {
+        // Try full nested path: "parent.zip/nested.zip"
+        let full_key = format!("{}/{}", parent_path, nested_path);
+        if let Some(pwd) = self.passwords.get(&full_key) {
+            return Some(pwd.clone());
+        }
+
+        // Try just the nested path
+        if let Some(pwd) = self.passwords.get(nested_path) {
+            return Some(pwd.clone());
+        }
+
+        // Try just the filename
+        if let Some(filename) = Path::new(nested_path).file_name() {
+            if let Some(filename_str) = filename.to_str() {
+                if let Some(pwd) = self.passwords.get(filename_str) {
+                    return Some(pwd.clone());
+                }
+            }
+        }
+
+        None
+    }
+}
+
+struct NestedZipScanParams<'a> {
+    parent_archive: &'a mut ::zip::ZipArchive<fs::File>,
+    file_index: usize,
+    nested_path: &'a str,
+    parent_path: &'a Path,
+    ctx: &'a mut ScanContext,
+    parent_password: Option<&'a [u8]>,
+    is_encrypted: bool,
+}
+
+/// Check if a filename is an archive file
+fn is_archive_file(filename: &str) -> bool {
+    detect_archive_format(Path::new(filename)).is_some()
+}
+
+/// Get archive format from filename
+fn get_archive_format(filename: &str) -> Option<String> {
+    detect_archive_format(Path::new(filename)).map(|fmt| fmt.as_str().to_string())
+}
+
+pub(super) fn resolve_nested_display_name(display_name: &str, nested_path: &str) -> String {
+    let trimmed = display_name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let should_fallback = trimmed.is_empty() || lower == "unknown" || lower.starts_with("unknown ");
+
+    if !should_fallback {
+        return trimmed.to_string();
+    }
+
+    Path::new(nested_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VersionFileCandidateKind {
+    UpdaterCfg,
+    VersionFile,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct VersionFileReadPlan {
+    updater_cfg_path: Option<String>,
+    version_file_paths: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct VersionFilesReadOutcome {
+    files_content: Option<(Option<String>, Vec<String>)>,
+    timed_out: bool,
+}
+
+#[derive(Debug, Default)]
+struct VersionReadOutcome {
+    version_info: Option<crate::models::VersionInfo>,
+    timed_out: bool,
+}
+
+fn classify_version_file_candidate(file_name: &str) -> Option<VersionFileCandidateKind> {
+    let file_name_lower = file_name.to_lowercase();
+
+    if file_name == "skunkcrafts_updater.cfg" {
+        Some(VersionFileCandidateKind::UpdaterCfg)
+    } else if file_name_lower.contains("version")
+        || file_name == "767.ini"
+        || file_name == "757.ini"
+    {
+        Some(VersionFileCandidateKind::VersionFile)
+    } else {
+        None
+    }
+}
+
+fn plan_version_file_reads<'a, I>(entries: I, internal_root: Option<&str>) -> VersionFileReadPlan
+where
+    I: IntoIterator<Item = (&'a str, u64)>,
+{
+    let search_prefix = internal_root.map(|r| {
+        if r.ends_with('/') {
+            r.to_string()
+        } else {
+            format!("{}/", r)
+        }
+    });
+
+    let mut plan = VersionFileReadPlan::default();
+    let mut best_updater_depth: Option<usize> = None;
+    let mut best_version_depth: Option<usize> = None;
+
+    for (file_path, size) in entries {
+        if size > 10240 {
+            continue;
+        }
+
+        if let Some(ref prefix) = search_prefix {
+            if !file_path.starts_with(prefix) {
+                continue;
+            }
+        }
+
+        let relative_path = if let Some(ref prefix) = search_prefix {
+            file_path.strip_prefix(prefix).unwrap_or(file_path)
+        } else {
+            file_path
+        };
+
+        let depth = relative_path.matches('/').count();
+        if depth > 2 {
+            continue;
+        }
+
+        let file_name = Path::new(relative_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        match classify_version_file_candidate(file_name) {
+            Some(VersionFileCandidateKind::UpdaterCfg) => {
+                if best_updater_depth.map(|best| depth < best).unwrap_or(true) {
+                    best_updater_depth = Some(depth);
+                    plan.updater_cfg_path = Some(file_path.to_string());
+                }
+            }
+            Some(VersionFileCandidateKind::VersionFile) => match best_version_depth {
+                Some(best_depth) if depth > best_depth => {}
+                Some(best_depth) if depth == best_depth => {
+                    plan.version_file_paths.push(file_path.to_string());
+                }
+                _ => {
+                    best_version_depth = Some(depth);
+                    plan.version_file_paths.clear();
+                    plan.version_file_paths.push(file_path.to_string());
+                }
+            },
+            None => {}
+        }
+    }
+
+    plan
+}
+
+fn infer_version_from_name(text: &str) -> Option<String> {
+    static VERSION_RE: OnceLock<Regex> = OnceLock::new();
+
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let re = VERSION_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9])(?P<version>v?\d+(?:[._][A-Za-z]?\d+){1,4}[A-Za-z0-9]*)")
+            .expect("valid version inference regex")
+    });
+
+    re.captures(normalized)
+        .and_then(|captures| captures.name("version"))
+        .map(|matched| matched.as_str().replace('_', "."))
+}
+
+/// Scans a directory or archive and detects addon types based on markers
+///
+/// Scanner is thread-safe as it contains no mutable state.
+/// All methods are stateless and can be called concurrently.
+///
+/// Note: Scanner automatically implements Send + Sync as it's an empty struct
+/// with no internal state, so no unsafe impl is needed.
+pub struct Scanner;
+
+impl Scanner {
+    pub fn new() -> Self {
+        Scanner
+    }
+
+    /// Check if a path should be ignored during scanning
+    fn should_ignore_path(path: &Path) -> bool {
+        // Check each component of the path
+        for component in path.components() {
+            if let Some(name) = component.as_os_str().to_str() {
+                // Ignore __MACOSX folders (macOS metadata)
+                if name == "__MACOSX" {
+                    return true;
+                }
+                // Ignore .DS_Store files (macOS metadata)
+                if name == ".DS_Store" {
+                    return true;
+                }
+                // Ignore Thumbs.db (Windows thumbnail cache)
+                if name == "Thumbs.db" {
+                    return true;
+                }
+                // Ignore desktop.ini (Windows folder settings)
+                if name == "desktop.ini" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Fast check for archive paths (string-based, avoids Path allocation)
+    #[inline]
+    fn should_ignore_archive_path(path: &str) -> bool {
+        path.contains("__MACOSX")
+            || path.contains(".DS_Store")
+            || path.ends_with("Thumbs.db")
+            || path.ends_with("desktop.ini")
+    }
+
+    /// Check if a path should be skipped based on skip_dirs
+    /// Optimized: O(1) average case with HashSet lookup for exact matches,
+    /// O(n) worst case for prefix checking (but only when needed)
+    #[inline]
+    fn should_skip_path(path: &Path, skip_dirs: &HashSet<PathBuf>) -> bool {
+        // Fast path: check if path is exactly in skip_dirs
+        if skip_dirs.contains(path) {
+            return false; // Don't skip the root itself, only its children
+        }
+
+        // Check if path is a child of any skip_dir
+        // This is still O(n) but we can optimize by checking ancestors
+        for ancestor in path.ancestors().skip(1) {
+            if skip_dirs.contains(ancestor) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a file path is inside any plugin directory
+    /// Optimized: Uses path ancestors for efficient checking
+    #[inline]
+    fn is_path_inside_plugin_dirs(file_path: &Path, plugin_dirs: &HashSet<PathBuf>) -> bool {
+        // Check each ancestor to see if it's a plugin directory
+        for ancestor in file_path.ancestors().skip(1) {
+            if plugin_dirs.contains(ancestor) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a string path is inside any plugin directory (for archive paths)
+    /// Optimized: Direct string prefix checking with HashSet
+    #[inline]
+    fn is_archive_path_inside_plugin_dirs(file_path: &str, plugin_dirs: &HashSet<String>) -> bool {
+        // Check if file_path starts with any plugin_dir
+        // Since plugin_dirs is typically small, this is acceptable
+        for plugin_dir in plugin_dirs {
+            if file_path.starts_with(plugin_dir) && file_path.len() > plugin_dir.len() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a file path is inside any aircraft directory (for filesystem paths)
+    /// Used to skip .xpl files that are embedded inside aircraft packages
+    #[inline]
+    fn is_path_inside_aircraft_dirs(file_path: &Path, aircraft_dirs: &HashSet<PathBuf>) -> bool {
+        for ancestor in file_path.ancestors().skip(1) {
+            if aircraft_dirs.contains(ancestor) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a path is inside any of the given directories
+    fn is_path_inside_dirs(file_path: &Path, dirs: &HashSet<PathBuf>) -> bool {
+        for ancestor in file_path.ancestors().skip(1) {
+            if dirs.contains(ancestor) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a string path is inside any aircraft directory (for archive paths)
+    /// Used to skip .xpl files that are embedded inside aircraft packages
+    #[inline]
+    fn is_archive_path_inside_aircraft_dirs(
+        file_path: &str,
+        aircraft_dirs: &HashSet<String>,
+    ) -> bool {
+        for aircraft_dir in aircraft_dirs {
+            let prefix = if aircraft_dir.ends_with('/') {
+                aircraft_dir.clone()
+            } else {
+                format!("{}/", aircraft_dir)
+            };
+            if file_path.starts_with(&prefix) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get marker type priority (lower number = higher priority)
+    /// Aircraft (.acf) has highest priority to ensure plugins inside aircraft are skipped
+    /// LuaScript has lowest priority to ensure lua files inside other addons are skipped
+    #[inline]
+    fn marker_type_priority(marker_type: &str) -> u8 {
+        match marker_type {
+            "acf" => 0,     // Aircraft - highest priority
+            "dsf" => 1,     // Scenery DSF / apt.dat - higher priority than library
+            "xpl" => 2,     // Plugin
+            "navdata" => 3, // Navigation data
+            "library" => 4, // Scenery library
+            "livery" => 5,  // Livery
+            "lua" => 6,     // Lua script - lowest priority
+            _ => 7,
+        }
+    }
+
+    /// Check if a directory contains child scenery packs in any of its subdirectories
+    /// (e.g. subdirectories containing "Earth nav data" or another "library.txt")
+    fn has_child_scenery_packs(dir: &Path) -> bool {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // If this subdirectory directly contains "Earth nav data" or its own "library.txt"
+                if path.join("Earth nav data").is_dir() || path.join("library.txt").is_file() {
+                    return true;
+                }
+                // Check 1 level further down (for nested container structures)
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub_entry in sub_entries.flatten() {
+                        let sub_path = sub_entry.path();
+                        if sub_path.is_dir()
+                            && (sub_path.join("Earth nav data").is_dir()
+                                || sub_path.join("library.txt").is_file())
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a library's internal root is an ancestor/container of any already-detected addon
+    pub(super) fn is_container_library(detected: &[DetectedItem], lib_root: Option<&str>) -> bool {
+        if let Some(root) = lib_root {
+            let prefix = if root.ends_with('/') {
+                root.to_string()
+            } else {
+                format!("{}/", root)
+            };
+            detected.iter().any(|d| {
+                if let Some(ref d_root) = d.archive_internal_root {
+                    let d_root_norm = d_root.replace('\\', "/");
+                    d_root_norm.starts_with(&prefix)
+                } else {
+                    false
+                }
+            })
+        } else {
+            !detected.is_empty()
+        }
+    }
+
+    /// Scan a path (file or directory) and detect all addon types
+    pub fn scan_path(&self, path: &Path, password: Option<&str>) -> Result<Vec<DetectedItem>> {
+        let original_input_path = path.to_string_lossy().to_string();
+        let mut ctx = ScanContext::new();
+        if let Some(pwd) = password {
+            ctx.passwords
+                .insert(path.to_string_lossy().to_string(), pwd.to_string());
+            let normalized = crate::archive_input::normalize_archive_entry_path(path)
+                .to_string_lossy()
+                .to_string();
+            ctx.passwords
+                .entry(normalized)
+                .or_insert_with(|| pwd.to_string());
+        }
+        let mut items = self.scan_path_with_context(path, &mut ctx)?;
+
+        // Set original_input_path for all detected items
+        for item in &mut items {
+            item.original_input_path = original_input_path.clone();
+        }
+
+        Ok(items)
+    }
+
+    /// Scan a path with a full passwords map (supports nested archive passwords)
+    /// Unlike scan_path which only accepts a single password for the outer archive,
+    /// this method injects ALL passwords into ScanContext so that nested archive
+    /// passwords (keyed as "parent_path/nested_name") can be found during scanning.
+    pub fn scan_path_with_passwords(
+        &self,
+        path: &Path,
+        passwords: &HashMap<String, String>,
+    ) -> Result<Vec<DetectedItem>> {
+        let original_input_path = path.to_string_lossy().to_string();
+        let mut ctx = ScanContext::new();
+        // Insert all provided passwords into context
+        // This includes outer archive passwords (key = archive path)
+        // and nested archive passwords (key = "parent_path/nested_name")
+        for (key, value) in passwords {
+            ctx.passwords.insert(key.clone(), value.clone());
+            let normalized = crate::archive_input::normalize_archive_entry_path(Path::new(key))
+                .to_string_lossy()
+                .to_string();
+            ctx.passwords
+                .entry(normalized)
+                .or_insert_with(|| value.clone());
+        }
+        let mut items = self.scan_path_with_context(path, &mut ctx)?;
+
+        // Set original_input_path for all detected items
+        for item in &mut items {
+            item.original_input_path = original_input_path.clone();
+        }
+
+        Ok(items)
+    }
+
+    /// Internal method: Scan a path with context (supports nested archives)
+    pub(super) fn scan_path_with_context(
+        &self,
+        path: &Path,
+        ctx: &mut ScanContext,
+    ) -> Result<Vec<DetectedItem>> {
+        let mut detected_items = Vec::new();
+
+        if path.is_dir() {
+            detected_items.extend(self.scan_directory(path)?);
+        } else if path.is_file() {
+            // Check if it's a standalone .lua file
+            if path.extension().and_then(|s| s.to_str()) == Some("lua") {
+                if let Some(item) = self.check_lua_script(path, path)? {
+                    detected_items.push(item);
+                }
+            } else {
+                detected_items.extend(self.scan_archive_with_context(path, ctx)?);
+            }
+        }
+
+        Ok(detected_items)
+    }
+
+    /// Internal method: Scan an archive with context (routes to format-specific scanners)
+    fn scan_archive_with_context(
+        &self,
+        archive_path: &Path,
+        ctx: &mut ScanContext,
+    ) -> Result<Vec<DetectedItem>> {
+        let normalized_archive = crate::archive_input::normalize_archive_entry_path(archive_path);
+        let password = ctx
+            .passwords
+            .get(&archive_path.to_string_lossy().to_string())
+            .cloned()
+            .or_else(|| {
+                ctx.passwords
+                    .get(&normalized_archive.to_string_lossy().to_string())
+                    .cloned()
+            });
+
+        match detect_archive_format(archive_path)
+            .or_else(|| detect_archive_format(&normalized_archive))
+        {
+            Some(ArchiveFormat::Zip) => {
+                self.scan_zip_with_context(archive_path, ctx, password.as_deref())
+            }
+            Some(ArchiveFormat::SevenZ) => {
+                self.scan_7z_with_context(archive_path, ctx, password.as_deref())
+            }
+            Some(ArchiveFormat::Rar) => {
+                self.scan_rar_with_context(archive_path, ctx, password.as_deref())
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Scan a directory using breadth-first (level-by-level) traversal
+    /// When a marker file is found, the entire addon root directory is skipped
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<DetectedItem>> {
+        use std::collections::VecDeque;
+
+        let mut detected = Vec::new();
+        let mut plugin_dirs: HashSet<PathBuf> = HashSet::new();
+        let mut aircraft_dirs: HashSet<PathBuf> = HashSet::new();
+        let mut skip_dirs: HashSet<PathBuf> = HashSet::new();
+        // Track directories where Lua scripts were found, so subdirectories' .lua files are skipped
+        let mut lua_dirs: HashSet<PathBuf> = HashSet::new();
+
+        // Queue for breadth-first traversal: (directory_path, current_depth)
+        let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+        queue.push_back((dir.to_path_buf(), 0));
+
+        const MAX_DEPTH: usize = 15;
+
+        while let Some((current_dir, depth)) = queue.pop_front() {
+            if depth > MAX_DEPTH {
+                continue;
+            }
+
+            // Check if this directory should be skipped
+            if Self::should_skip_path(&current_dir, &skip_dirs) {
+                continue;
+            }
+
+            // Skip ignored paths
+            if Self::should_ignore_path(&current_dir) {
+                continue;
+            }
+
+            // Read directory entries
+            let entries = match fs::read_dir(&current_dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            // Separate files and subdirectories
+            let mut files: Vec<PathBuf> = Vec::new();
+            let mut subdirs: Vec<PathBuf> = Vec::new();
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip ignored paths
+                if Self::should_ignore_path(&path) {
+                    continue;
+                }
+
+                if path.is_file() {
+                    files.push(path);
+                } else if path.is_dir() {
+                    subdirs.push(path);
+                }
+            }
+
+            // First pass on files: identify plugin directories and aircraft directories
+            for file_path in &files {
+                let file_ext = file_path.extension().and_then(|s| s.to_str());
+
+                if file_ext == Some("xpl") {
+                    if let Some(parent) = file_path.parent() {
+                        let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+                        // Check if parent is platform-specific folder
+                        let plugin_root = if matches!(
+                            parent_name,
+                            "32" | "64" | "win" | "lin" | "mac" | "win_x64" | "mac_x64" | "lin_x64"
+                        ) {
+                            parent.parent().unwrap_or(parent).to_path_buf()
+                        } else {
+                            parent.to_path_buf()
+                        };
+
+                        plugin_dirs.insert(plugin_root);
+                    }
+                } else if file_ext == Some("acf") {
+                    // Track aircraft directories to skip embedded plugins
+                    if let Some(parent) = file_path.parent() {
+                        aircraft_dirs.insert(parent.to_path_buf());
+                    }
+                }
+            }
+
+            // Second pass on files: detect addons
+            for file_path in &files {
+                // Check if inside a detected plugin directory
+                let is_inside_plugin = Self::is_path_inside_plugin_dirs(file_path, &plugin_dirs);
+                // Check if inside a detected aircraft directory
+                let is_inside_aircraft =
+                    Self::is_path_inside_aircraft_dirs(file_path, &aircraft_dirs);
+
+                // Check if inside a skip directory
+                if Self::should_skip_path(file_path, &skip_dirs) {
+                    continue;
+                }
+
+                let file_ext = file_path.extension().and_then(|s| s.to_str());
+
+                // Skip .acf/.dsf files inside plugin directories
+                if (file_ext == Some("acf") || file_ext == Some("dsf")) && is_inside_plugin {
+                    continue;
+                }
+
+                // Skip .xpl files inside aircraft directories (embedded plugins)
+                if file_ext == Some("xpl") && is_inside_aircraft {
+                    continue;
+                }
+
+                // Check for addon markers
+                if let Some(item) = self.check_aircraft(file_path, dir)? {
+                    let root = PathBuf::from(&item.path);
+                    skip_dirs.insert(root);
+                    detected.push(item);
+                    continue;
+                }
+
+                if let Some(item) = self.check_scenery(file_path, dir)? {
+                    let root = PathBuf::from(&item.path);
+                    skip_dirs.insert(root);
+                    detected.push(item);
+                    continue;
+                }
+
+                if let Some(item) = self.check_plugin(file_path, dir)? {
+                    let root = PathBuf::from(&item.path);
+                    skip_dirs.insert(root);
+                    detected.push(item);
+                    continue;
+                }
+
+                if let Some(item) = self.check_navdata(file_path, dir)? {
+                    let root = PathBuf::from(&item.path);
+                    skip_dirs.insert(root);
+                    detected.push(item);
+                    continue;
+                }
+
+                if let Some(item) = self.check_livery(file_path, dir)? {
+                    let root = PathBuf::from(&item.path);
+                    skip_dirs.insert(root);
+                    detected.push(item);
+                    continue;
+                }
+
+                // Lua script detection (lowest priority - only standalone .lua files)
+                // Skip if a parent directory already has .lua files detected
+                if !Self::is_path_inside_dirs(file_path, &lua_dirs) {
+                    if let Some(item) = self.check_lua_script(file_path, dir)? {
+                        // Record this directory so subdirectories' .lua files are skipped
+                        if let Some(parent) = file_path.parent() {
+                            lua_dirs.insert(parent.to_path_buf());
+                        }
+                        detected.push(item);
+                        continue;
+                    }
+                }
+            }
+
+            // Add subdirectories to queue (only if not in skip_dirs)
+            for subdir in subdirs {
+                if !Self::should_skip_path(&subdir, &skip_dirs) {
+                    queue.push_back((subdir, depth + 1));
+                }
+            }
+        }
+
+        Ok(detected)
+    }
+
+    /// Scan archive without full extraction
+    #[allow(dead_code)]
+    fn scan_archive(
+        &self,
+        archive_path: &Path,
+        password: Option<&str>,
+    ) -> Result<Vec<DetectedItem>> {
+        match detect_archive_format(archive_path) {
+            Some(ArchiveFormat::Zip) => self.scan_zip(archive_path, password),
+            Some(ArchiveFormat::SevenZ) => self.scan_7z(archive_path, password),
+            Some(ArchiveFormat::Rar) => self.scan_rar(archive_path, password),
+            None => Ok(Vec::new()), // Silently skip unsupported files
+        }
+    }
+
+    // Type A: Aircraft Detection
+    fn check_aircraft(&self, file_path: &Path, root: &Path) -> Result<Option<DetectedItem>> {
+        if file_path.extension().and_then(|s| s.to_str()) != Some("acf") {
+            return Ok(None);
+        }
+
+        // Get the parent directory of the .acf file
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?;
+
+        // If .acf is in root, use the root folder name
+        // Otherwise, use the immediate parent folder
+        let mut install_path = if parent == root {
+            root.to_path_buf()
+        } else {
+            parent.to_path_buf()
+        };
+
+        // Special case: if the parent folder is named "_TCAS_AI_", go up one more level
+        // This is for AI traffic aircraft that are part of a larger aircraft package
+        if let Some(parent_name) = install_path.file_name().and_then(|s| s.to_str()) {
+            if parent_name == "_TCAS_AI_" {
+                if let Some(grandparent) = install_path.parent() {
+                    install_path = grandparent.to_path_buf();
+                }
+            }
+        }
+
+        let display_name = install_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Aircraft")
+            .to_string();
+
+        // Read version info from the install folder
+        let (version, _, _) = crate::management_index::read_version_info_with_url(&install_path);
+        let version_info = version.map(|v| crate::models::VersionInfo { version: Some(v) });
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Aircraft,
+            path: install_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: None,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    fn detect_aircraft_in_archive(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        self.detect_aircraft_in_archive_internal(file_path, archive_path, true)
+    }
+
+    fn detect_aircraft_in_archive_without_version(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        self.detect_aircraft_in_archive_internal(file_path, archive_path, false)
+    }
+
+    fn detect_aircraft_in_archive_internal(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+        include_version: bool,
+    ) -> Result<Option<DetectedItem>> {
+        let path = PathBuf::from(file_path);
+        let parent = path.parent();
+
+        // Determine the aircraft root folder inside the archive
+        let (display_name, internal_root) = if let Some(mut p) = parent {
+            if p.as_os_str().is_empty() {
+                // .acf is in archive root, use archive name as display name
+                // Internal root is empty (extract all to target)
+                (
+                    archive_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown Aircraft")
+                        .to_string(),
+                    None,
+                )
+            } else {
+                // Special case: if the parent folder is named "_TCAS_AI_", go up one more level
+                if let Some(parent_name) = p.file_name().and_then(|s| s.to_str()) {
+                    if parent_name == "_TCAS_AI_" {
+                        if let Some(grandparent) = p.parent() {
+                            if !grandparent.as_os_str().is_empty() {
+                                p = grandparent;
+                            }
+                        }
+                    }
+                }
+
+                // Get the top-level folder in the archive
+                let components: Vec<_> = p.components().collect();
+                let top_folder = components
+                    .first()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string());
+
+                // Use parent folder name as display name
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Aircraft")
+                    .to_string();
+
+                (name, top_folder)
+            }
+        } else {
+            (
+                archive_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Aircraft")
+                    .to_string(),
+                None,
+            )
+        };
+
+        let version_info = if include_version {
+            self.read_version_from_archive(archive_path, internal_root.as_deref())
+        } else {
+            None
+        };
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Aircraft,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    // Type B: Scenery Detection
+    fn check_scenery(&self, file_path: &Path, _root: &Path) -> Result<Option<DetectedItem>> {
+        let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Check for DSF or Earth nav data/apt.dat first (actual scenery pack takes precedence over library)
+        if file_path.extension().and_then(|s| s.to_str()) == Some("dsf")
+            || (file_name == "apt.dat"
+                && file_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    == Some("Earth nav data"))
+        {
+            return self.detect_scenery_by_dsf(file_path);
+        }
+
+        if file_name == "library.txt" {
+            return self.detect_scenery_by_library(file_path);
+        }
+
+        Ok(None)
+    }
+
+    fn detect_scenery_by_library(&self, file_path: &Path) -> Result<Option<DetectedItem>> {
+        // Install the immediate folder containing library.txt
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?;
+
+        // If this directory has child scenery packs in subdirectories (e.g. it is a multi-pack bundle container),
+        // do not detect this parent directory as a single monolithic library pack.
+        // Its child scenery packs must be detected and installed as independent scenery packs.
+        if Self::has_child_scenery_packs(parent) {
+            crate::logger::log_info(
+                &format!(
+                    "Skipping container-level library.txt at '{}' because child scenery packs exist in subdirectories",
+                    file_path.display()
+                ),
+                Some("scanner"),
+            );
+            return Ok(None);
+        }
+
+        let display_name = parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Library")
+            .to_string();
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::SceneryLibrary,
+            path: parent.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: None,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    fn detect_scenery_by_dsf(&self, file_path: &Path) -> Result<Option<DetectedItem>> {
+        // DSF structure: {Scenery}/Earth nav data/{...}/{file}.dsf
+        // Search upward for "Earth nav data" folder, then go one more level up
+        let install_dir = self.find_scenery_root_from_dsf(file_path);
+
+        if let Some(install_dir) = install_dir {
+            let display_name = install_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown Scenery")
+                .to_string();
+
+            Ok(Some(DetectedItem {
+                original_input_path: String::new(),
+                addon_type: AddonType::Scenery,
+                path: install_dir.to_string_lossy().to_string(),
+                display_name,
+                archive_internal_root: None,
+                extraction_chain: None,
+                navdata_info: None,
+                livery_aircraft_type: None,
+                version_info: None,
+                companion_paths: Vec::new(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Find scenery root by searching upward for "Earth nav data" folder
+    fn find_scenery_root_from_dsf(&self, dsf_path: &Path) -> Option<PathBuf> {
+        let mut current = dsf_path.parent()?;
+
+        // Search upward for "Earth nav data" folder (max 20 levels for deeply nested structures)
+        for level in 0..20 {
+            if let Some(name) = current.file_name().and_then(|s| s.to_str()) {
+                if name == "Earth nav data" {
+                    // Found it! Go one level up to get scenery root
+                    return current.parent().map(|p| p.to_path_buf());
+                }
+            }
+
+            // Log warning if we're getting deep
+            if level == 15 {
+                crate::logger::log_info(
+                    &format!("Deep directory nesting detected while searching for 'Earth nav data': {:?}", dsf_path),
+                    Some("scanner")
+                );
+            }
+
+            current = current.parent()?;
+        }
+
+        None
+    }
+
+    fn detect_scenery_library(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        let path = PathBuf::from(file_path);
+        let parent = path.parent();
+
+        // Get the scenery library folder name (parent of library.txt)
+        let (display_name, internal_root) = if let Some(p) = parent {
+            if p.as_os_str().is_empty() {
+                // library.txt is in archive root
+                (
+                    archive_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown Library")
+                        .to_string(),
+                    None,
+                )
+            } else {
+                // The folder containing library.txt is the library root
+                let library_root = p.to_string_lossy().to_string();
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Library")
+                    .to_string();
+
+                (name, Some(library_root))
+            }
+        } else {
+            (
+                archive_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Library")
+                    .to_string(),
+                None,
+            )
+        };
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::SceneryLibrary,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    fn detect_scenery_dsf(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        let path = PathBuf::from(file_path);
+
+        // DSF structure: {Scenery}/Earth nav data/{...}/{file}.dsf
+        // Search upward for "Earth nav data" folder, then go one more level up
+        let scenery_root = self.find_scenery_root_from_archive_path(&path);
+
+        let (display_name, internal_root) = if let Some(root) = scenery_root {
+            if root.as_os_str().is_empty() {
+                // Scenery is at archive root level
+                (
+                    archive_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown Scenery")
+                        .to_string(),
+                    None,
+                )
+            } else {
+                let root_str = root.to_string_lossy().to_string();
+                let name = root
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Scenery")
+                    .to_string();
+
+                (name, Some(root_str))
+            }
+        } else {
+            // Couldn't find "Earth nav data" folder, skip this file
+            return Ok(None);
+        };
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Scenery,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    /// Find scenery root from archive path by searching for "Earth nav data"
+    fn find_scenery_root_from_archive_path(&self, dsf_path: &Path) -> Option<PathBuf> {
+        let mut current = dsf_path.parent()?;
+
+        // Search upward for "Earth nav data" folder (max 20 levels for deeply nested structures)
+        for level in 0..20 {
+            if let Some(name) = current.file_name().and_then(|s| s.to_str()) {
+                if name == "Earth nav data" {
+                    // Found it! Go one level up to get scenery root
+                    return current.parent().map(|p| p.to_path_buf());
+                }
+            }
+
+            // Log warning if we're getting deep
+            if level == 15 {
+                crate::logger::log_info(
+                    &format!("Deep directory nesting in archive while searching for 'Earth nav data': {:?}", dsf_path),
+                    Some("scanner")
+                );
+            }
+
+            match current.parent() {
+                Some(p) if !p.as_os_str().is_empty() => current = p,
+                _ => break,
+            }
+        }
+
+        None
+    }
+
+    // Type C: Plugin Detection
+    fn check_plugin(&self, file_path: &Path, _root: &Path) -> Result<Option<DetectedItem>> {
+        if file_path.extension().and_then(|s| s.to_str()) != Some("xpl") {
+            return Ok(None);
+        }
+
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?;
+
+        let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Check if parent is a platform-specific folder
+        let install_path = if matches!(
+            parent_name,
+            "32" | "64" | "win" | "lin" | "mac" | "win_x64" | "mac_x64" | "lin_x64"
+        ) {
+            // Go up one more level
+            parent.parent().unwrap_or(parent).to_path_buf()
+        } else {
+            parent.to_path_buf()
+        };
+
+        let display_name = install_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Plugin")
+            .to_string();
+
+        // Read version info from the install folder
+        let (version, _, _) = crate::management_index::read_version_info_with_url(&install_path);
+        let version_info = version.map(|v| crate::models::VersionInfo { version: Some(v) });
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Plugin,
+            path: install_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: None,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    fn detect_plugin_in_archive(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        self.detect_plugin_in_archive_internal(file_path, archive_path, true)
+    }
+
+    fn detect_plugin_in_archive_without_version(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        self.detect_plugin_in_archive_internal(file_path, archive_path, false)
+    }
+
+    fn detect_plugin_in_archive_internal(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+        include_version: bool,
+    ) -> Result<Option<DetectedItem>> {
+        let path = PathBuf::from(file_path);
+        let parent = path.parent();
+
+        let (display_name, internal_root) = if let Some(p) = parent {
+            let parent_name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+            // Check if parent is platform-specific
+            let plugin_root = if matches!(
+                parent_name,
+                "32" | "64" | "win" | "lin" | "mac" | "win_x64" | "mac_x64" | "lin_x64"
+            ) {
+                // Go up one more level
+                p.parent()
+            } else {
+                Some(p)
+            };
+
+            if let Some(root) = plugin_root {
+                if root.as_os_str().is_empty() {
+                    (
+                        archive_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown Plugin")
+                            .to_string(),
+                        None,
+                    )
+                } else {
+                    let root_str = root.to_string_lossy().to_string();
+                    let name = root
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown Plugin")
+                        .to_string();
+                    (name, Some(root_str))
+                }
+            } else {
+                ("Unknown Plugin".to_string(), None)
+            }
+        } else {
+            ("Unknown Plugin".to_string(), None)
+        };
+
+        let version_info = if include_version {
+            self.read_version_from_archive(archive_path, internal_root.as_deref())
+        } else {
+            None
+        };
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Plugin,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    // Type D: Navdata Detection
+
+    /// Known navdata format keywords.
+    /// A cycle.json `name` is accepted if it contains any of these strings.
+    const NAVDATA_KNOWN_FORMATS: &[&str] = &[
+        "X-Plane",
+        "FlightFactor Boeing 777v2",
+        "Universal FMC (UFMC)",
+        "Modern UFMC",
+    ];
+
+    fn is_known_navdata_format(name: &str) -> bool {
+        Self::NAVDATA_KNOWN_FORMATS
+            .iter()
+            .any(|fmt| name.contains(fmt))
+    }
+
+    fn check_navdata(&self, file_path: &Path, _root: &Path) -> Result<Option<DetectedItem>> {
+        if file_path.file_name().and_then(|s| s.to_str()) != Some("cycle.json") {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(file_path).context("Failed to read cycle.json")?;
+
+        let cycle: NavdataCycle =
+            serde_json::from_str(&content).context("Failed to parse cycle.json")?;
+
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?;
+
+        // Create NavdataInfo from parsed cycle
+        let navdata_info = NavdataInfo {
+            name: cycle.name.clone(),
+            cycle: cycle.cycle.clone(),
+            airac: cycle.airac.clone(),
+        };
+
+        // Validate navdata format
+        if !Self::is_known_navdata_format(&cycle.name) {
+            crate::logger::log_debug(
+                &format!("Skipping unsupported navdata format: {}", cycle.name),
+                Some("scanner"),
+                None,
+            );
+            return Ok(None);
+        }
+
+        let install_path = parent.to_path_buf();
+        let display_name = cycle.name.clone();
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Navdata,
+            path: install_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: None,
+            extraction_chain: None,
+            navdata_info: Some(navdata_info),
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    fn detect_navdata_in_archive(
+        &self,
+        file_path: &str,
+        content: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        let cycle: NavdataCycle =
+            serde_json::from_str(content).context("Failed to parse cycle.json")?;
+
+        let path = PathBuf::from(file_path);
+        let parent = path.parent();
+
+        // Create NavdataInfo from parsed cycle
+        let navdata_info = NavdataInfo {
+            name: cycle.name.clone(),
+            cycle: cycle.cycle.clone(),
+            airac: cycle.airac.clone(),
+        };
+
+        // Validate navdata format
+        if !Self::is_known_navdata_format(&cycle.name) {
+            crate::logger::log_debug(
+                &format!(
+                    "Skipping unsupported navdata format in archive: {}",
+                    cycle.name
+                ),
+                Some("scanner"),
+                None,
+            );
+            return Ok(None);
+        }
+
+        let display_name = cycle.name.clone();
+        let is_gns430 = cycle.name.contains("GNS430");
+
+        // Get the navdata folder root inside the archive
+        // For GNS430: use grandparent (parent's parent) to preserve the folder structure
+        // For regular navdata: use parent (direct parent of cycle.json)
+        let internal_root = if let Some(p) = parent {
+            if p.as_os_str().is_empty() {
+                None
+            } else if is_gns430 {
+                // GNS430: use grandparent directory
+                p.parent()
+                    .filter(|gp| !gp.as_os_str().is_empty())
+                    .map(|gp| gp.to_string_lossy().to_string())
+            } else {
+                Some(p.to_string_lossy().to_string())
+            }
+        } else {
+            None
+        };
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::Navdata,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: Some(navdata_info),
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths: Vec::new(),
+        }))
+    }
+
+    // Type E: Livery Detection
+    fn check_livery(&self, file_path: &Path, _root: &Path) -> Result<Option<DetectedItem>> {
+        let file_path_str = file_path.to_string_lossy();
+
+        // Check if path matches any livery pattern
+        if let Some((aircraft_type_id, livery_root)) =
+            livery_patterns::check_livery_pattern(&file_path_str)
+        {
+            let livery_path = if livery_root.is_empty() {
+                file_path.to_path_buf()
+            } else {
+                PathBuf::from(&livery_root)
+            };
+
+            let display_name = livery_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown Livery")
+                .to_string();
+
+            // Get the aircraft name for display
+            let aircraft_name = livery_patterns::get_aircraft_name(&aircraft_type_id)
+                .unwrap_or_else(|| aircraft_type_id.clone());
+
+            Ok(Some(DetectedItem {
+                original_input_path: String::new(),
+                addon_type: AddonType::Livery,
+                path: livery_path.to_string_lossy().to_string(),
+                display_name: format!("{} ({})", display_name, aircraft_name),
+                archive_internal_root: None,
+                extraction_chain: None,
+                navdata_info: None,
+                livery_aircraft_type: Some(aircraft_type_id.clone()),
+                version_info: None,
+                companion_paths: Vec::new(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn detect_livery_in_archive(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        // Check if path matches any livery pattern
+        if let Some((aircraft_type_id, livery_root)) =
+            livery_patterns::check_livery_pattern(file_path)
+        {
+            let internal_root = if livery_root.is_empty() {
+                None
+            } else {
+                Some(livery_root.clone())
+            };
+
+            let display_name = if livery_root.is_empty() {
+                archive_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Livery")
+                    .to_string()
+            } else {
+                Path::new(&livery_root)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown Livery")
+                    .to_string()
+            };
+
+            // Get the aircraft name for display
+            let aircraft_name = livery_patterns::get_aircraft_name(&aircraft_type_id)
+                .unwrap_or_else(|| aircraft_type_id.clone());
+
+            Ok(Some(DetectedItem {
+                original_input_path: String::new(),
+                addon_type: AddonType::Livery,
+                path: archive_path.to_string_lossy().to_string(),
+                display_name: format!("{} ({})", display_name, aircraft_name),
+                archive_internal_root: internal_root,
+                extraction_chain: None,
+                navdata_info: None,
+                livery_aircraft_type: Some(aircraft_type_id.clone()),
+                version_info: None,
+                companion_paths: Vec::new(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Parse Lua script content to find companion files/folders referenced by SCRIPT_DIRECTORY
+    fn parse_lua_companions(lua_content: &str) -> Vec<String> {
+        let re = Regex::new(r#"SCRIPT_DIRECTORY\s*\.\.\s*["']([^"']+)["']"#).unwrap();
+        let mut companions = HashSet::new();
+
+        for cap in re.captures_iter(lua_content) {
+            if let Some(path_match) = cap.get(1) {
+                let path = path_match.as_str();
+                // Extract first path component (folder or file name)
+                if let Some(first_component) = Self::extract_first_component(path) {
+                    companions.insert(first_component);
+                }
+            }
+        }
+
+        companions.into_iter().collect()
+    }
+
+    /// Check whether a path component is valid as a Lua companion root entry.
+    /// Rejects traversal-like dot segments such as ".", "..", or "...".
+    fn is_valid_companion_component(component: &str) -> bool {
+        !component.is_empty() && !component.chars().all(|c| c == '.')
+    }
+
+    /// Extract the first path component from a path string
+    fn extract_first_component(path: &str) -> Option<String> {
+        let mut parts = path
+            .trim_start_matches(['/', '\\'])
+            .split(['/', '\\'])
+            .filter(|s| !s.is_empty())
+            .peekable();
+
+        // Allow one or more leading "./" segments, but reject traversal-like segments.
+        while let Some(part) = parts.peek() {
+            if *part == "." {
+                let _ = parts.next();
+            } else {
+                break;
+            }
+        }
+
+        let first = parts.next()?;
+        if !Self::is_valid_companion_component(first) {
+            return None;
+        }
+
+        Some(first.to_string())
+    }
+
+    // Type G: Lua Script Detection (for FlyWithLua)
+    fn check_lua_script(&self, file_path: &Path, _root: &Path) -> Result<Option<DetectedItem>> {
+        // Only detect .lua files
+        if file_path.extension().and_then(|s| s.to_str()) != Some("lua") {
+            return Ok(None);
+        }
+
+        // Get the file name (without extension) as display name
+        let display_name = file_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Script")
+            .to_string();
+
+        // Read the lua file content to parse companions
+        let mut companion_paths = Vec::new();
+        if let Ok(lua_content) = fs::read_to_string(file_path) {
+            let companion_names = Self::parse_lua_companions(&lua_content);
+
+            // Check if companions exist in the same directory as the .lua file
+            if let Some(parent_dir) = file_path.parent() {
+                for companion_name in companion_names {
+                    let companion_path = parent_dir.join(&companion_name);
+                    if companion_path.exists() {
+                        companion_paths.push(companion_name);
+                    }
+                }
+
+                if companion_paths.is_empty() {
+                    let sibling_entries = Self::list_lua_sibling_entries_from_directory(parent_dir);
+                    companion_paths = Self::infer_lua_companions_from_archive_entries(
+                        &display_name,
+                        &sibling_entries,
+                    );
+                }
+            }
+        }
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::LuaScript,
+            path: file_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: None,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths,
+        }))
+    }
+
+    fn detect_lua_script_in_archive_with_data(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+        lua_content: Option<&str>,
+        archive_entries: Option<&[String]>,
+    ) -> Result<Option<DetectedItem>> {
+        let path = PathBuf::from(file_path);
+
+        // Get the file name as display name
+        let display_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Script")
+            .to_string();
+
+        // For archives, the internal root is the parent directory of the lua file (if any)
+        let internal_root = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_string_lossy().to_string());
+
+        // Parse companions from archive
+        let mut companion_paths = Vec::new();
+        let mut companion_names = if let Some(content) = lua_content {
+            Self::parse_lua_companions(content)
+        } else if let Ok(content) = self.read_lua_from_archive(archive_path, file_path) {
+            Self::parse_lua_companions(&content)
+        } else {
+            Vec::new()
+        };
+
+        let use_layout_inference = companion_names.is_empty();
+
+        if !companion_names.is_empty() || use_layout_inference {
+            let owned_entries;
+            let entries: &[String] = if let Some(entries) = archive_entries {
+                entries
+            } else if let Ok(listed) = self.list_archive_entries(archive_path) {
+                owned_entries = listed;
+                &owned_entries
+            } else {
+                &[]
+            };
+
+            // Solid 7z fast-scan fallback:
+            // if lua content was intentionally skipped (empty placeholder),
+            // infer companion candidates from sibling archive entries.
+            if use_layout_inference {
+                companion_names =
+                    Self::infer_lua_companions_from_archive_entries(file_path, entries);
+            }
+
+            let lua_parent = internal_root.as_deref().unwrap_or("");
+            for companion_name in companion_names {
+                // Build the expected companion path in archive
+                let companion_prefix = if lua_parent.is_empty() {
+                    companion_name.clone()
+                } else {
+                    format!("{}/{}", lua_parent, companion_name)
+                };
+                let slash_prefix = format!("{}/", companion_prefix);
+                let backslash_prefix = format!("{}\\", companion_prefix);
+
+                // Companion exists if the exact file exists, or there are nested files under that folder.
+                if entries.iter().any(|entry| {
+                    entry == &companion_prefix
+                        || entry.starts_with(&slash_prefix)
+                        || entry.starts_with(&backslash_prefix)
+                }) {
+                    companion_paths.push(companion_name);
+                }
+            }
+        }
+
+        Ok(Some(DetectedItem {
+            original_input_path: String::new(),
+            addon_type: AddonType::LuaScript,
+            path: archive_path.to_string_lossy().to_string(),
+            display_name,
+            archive_internal_root: internal_root,
+            extraction_chain: None,
+            navdata_info: None,
+            livery_aircraft_type: None,
+            version_info: None,
+            companion_paths,
+        }))
+    }
+
+    /// Infer Lua companions from archive layout when script content is unavailable.
+    /// This is a best-effort fallback for solid archives.
+    fn infer_lua_companions_from_archive_entries(
+        file_path: &str,
+        entries: &[String],
+    ) -> Vec<String> {
+        use std::collections::HashMap;
+
+        let normalized_file = file_path.replace('\\', "/");
+        let script_stem = Path::new(&normalized_file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let script_name = Path::new(&normalized_file)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        let lua_parent = Path::new(&normalized_file)
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+
+        let prefix = if lua_parent.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", lua_parent.trim_matches('/'))
+        };
+
+        let mut inferred: HashMap<String, bool> = HashMap::new(); // candidate -> has_nested_entry
+
+        for entry in entries {
+            let normalized = entry.replace('\\', "/");
+            let relative = if prefix.is_empty() {
+                normalized.as_str()
+            } else if let Some(rel) = normalized.strip_prefix(&prefix) {
+                rel
+            } else {
+                continue;
+            };
+
+            if relative.is_empty() {
+                continue;
+            }
+
+            let first = relative
+                .split('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("");
+            if first.is_empty() {
+                continue;
+            }
+
+            if first.eq_ignore_ascii_case(script_name) {
+                continue;
+            }
+
+            let first_lower = first.to_ascii_lowercase();
+            let first_no_ext = Path::new(first)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if first_lower.ends_with(".lua")
+                || first_lower.ends_with(".txt")
+                || first_lower.ends_with(".md")
+                || first_lower.ends_with(".pdf")
+                || first_lower.ends_with(".rtf")
+                || first_lower.ends_with(".zip")
+                || first_lower.ends_with(".7z")
+                || first_lower.ends_with(".rar")
+                || first_no_ext == "readme"
+                || first_no_ext == "license"
+                || first_no_ext == "changelog"
+                || first_no_ext == "manual"
+                || first_no_ext == "install"
+                || first_no_ext == "docs"
+                || first_no_ext == "doc"
+            {
+                continue;
+            }
+
+            if Self::is_valid_companion_component(first) {
+                let has_nested = relative.contains('/');
+                inferred
+                    .entry(first.to_string())
+                    .and_modify(|v| *v = *v || has_nested)
+                    .or_insert(has_nested);
+            }
+        }
+
+        if inferred.is_empty() {
+            return Vec::new();
+        }
+
+        // Prefer directory-like companions when any exist; this avoids common
+        // false positives from unrelated single files in the same folder.
+        let has_directory_like = inferred.values().any(|v| *v);
+        let mut result: Vec<String> = inferred
+            .into_iter()
+            .filter_map(|(name, is_dir_like)| {
+                if has_directory_like && !is_dir_like {
+                    None
+                } else {
+                    Some(name)
+                }
+            })
+            .collect();
+
+        // Strong disambiguation:
+        // if a companion exactly matches the script stem, keep only that one.
+        // Example:
+        //   script: Simple_Ground_Equipment_and_Services.lua
+        //   siblings: Simple_Ground_Equipment_and_Services/,
+        //             Simple_Ground_Equipment_and_Services_expanded_documentation/
+        // Keep only the exact-stem companion to avoid documentation false positives.
+        if !script_stem.is_empty() {
+            let exact_stem: Vec<String> = result
+                .iter()
+                .filter(|name| name.to_ascii_lowercase() == script_stem)
+                .cloned()
+                .collect();
+            if !exact_stem.is_empty() {
+                return exact_stem;
+            }
+        }
+
+        result.sort();
+        result
+    }
+
+    /// Build archive-like relative entries for Lua sibling inference from an on-disk folder.
+    fn list_lua_sibling_entries_from_directory(parent_dir: &Path) -> Vec<String> {
+        let mut entries = Vec::new();
+
+        for entry in walkdir::WalkDir::new(parent_dir)
+            .follow_links(false)
+            .min_depth(1)
+            .max_depth(4)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            let Ok(relative) = entry.path().strip_prefix(parent_dir) else {
+                continue;
+            };
+            let rel = relative.to_string_lossy().replace('\\', "/");
+            if !rel.is_empty() {
+                entries.push(rel);
+            }
+        }
+
+        entries
+    }
+
+    fn detect_lua_script_in_archive(
+        &self,
+        file_path: &str,
+        archive_path: &Path,
+    ) -> Result<Option<DetectedItem>> {
+        self.detect_lua_script_in_archive_with_data(file_path, archive_path, None, None)
+    }
+
+    /// Read Lua file content from archive
+    fn read_lua_from_archive(&self, archive_path: &Path, lua_file_path: &str) -> Result<String> {
+        match detect_archive_format(archive_path) {
+            Some(ArchiveFormat::Zip) => self.read_file_from_zip(archive_path, lua_file_path),
+            Some(ArchiveFormat::SevenZ) => {
+                self.read_file_from_7z_no_password(archive_path, lua_file_path)
+            }
+            Some(ArchiveFormat::Rar) => {
+                self.read_file_from_rar_no_password(archive_path, lua_file_path)
+            }
+            None => Err(anyhow::anyhow!("Unsupported archive format")),
+        }
+    }
+
+    /// List all entries in an archive
+    fn list_archive_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
+        match detect_archive_format(archive_path) {
+            Some(ArchiveFormat::Zip) => self.list_zip_entries(archive_path),
+            Some(ArchiveFormat::SevenZ) => self.list_7z_entries(archive_path),
+            Some(ArchiveFormat::Rar) => self.list_rar_entries(archive_path),
+            None => Err(anyhow::anyhow!("Unsupported archive format")),
+        }
+    }
+
+    /// Read version information from an archive
+    /// Returns VersionInfo if version files are found and parsed successfully
+    fn read_version_from_archive(
+        &self,
+        archive_path: &Path,
+        internal_root: Option<&str>,
+    ) -> Option<crate::models::VersionInfo> {
+        // Read version file contents from the archive
+        let version_files_content = match detect_archive_format(archive_path) {
+            Some(ArchiveFormat::Zip) => {
+                self.read_version_files_from_zip(archive_path, internal_root)
+            }
+            Some(ArchiveFormat::SevenZ) => {
+                self.read_version_files_from_7z(archive_path, internal_root)
+            }
+            Some(ArchiveFormat::Rar) => {
+                self.read_version_files_from_rar(archive_path, internal_root)
+            }
+            None => return None,
+        };
+
+        // Parse version from the collected file contents
+        if let Some((updater_cfg_content, version_file_contents)) = version_files_content {
+            // Parse version using the same logic as management_index
+            let version =
+                self.parse_version_from_contents(updater_cfg_content, version_file_contents);
+            version.map(|v| crate::models::VersionInfo { version: Some(v) })
+        } else {
+            None
+        }
+    }
+
+    /// Parse version from file contents (mimics read_version_from_paths logic)
+    fn parse_version_from_contents(
+        &self,
+        updater_cfg_content: Option<String>,
+        version_file_contents: Vec<String>,
+    ) -> Option<String> {
+        // First, try skunkcrafts_updater.cfg (higher priority)
+        if let Some(content) = updater_cfg_content {
+            for line in content.lines() {
+                let line = line.trim();
+                let line_lower = line.to_lowercase();
+
+                if line_lower.starts_with("version|") {
+                    let parts: Vec<&str> = line.splitn(2, '|').collect();
+                    if parts.len() == 2 {
+                        let version = parts[1].trim();
+                        if !version.is_empty() {
+                            return Some(version.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to version files
+        let mut version_tokens: Vec<String> = Vec::new();
+        let mut first_line_fallback: Option<String> = None;
+
+        for content in version_file_contents {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Record first non-empty line as fallback
+                if first_line_fallback.is_none() {
+                    first_line_fallback = Some(line.to_string());
+                }
+
+                if !crate::management_index::has_version_pattern(line) {
+                    continue;
+                }
+                for token in line.split_whitespace() {
+                    if crate::management_index::has_version_pattern(token)
+                        && !version_tokens.contains(&token.to_string())
+                    {
+                        version_tokens.push(token.to_string());
+                    }
+                }
+            }
+        }
+
+        if !version_tokens.is_empty() {
+            return Some(version_tokens.join("/"));
+        }
+
+        // Fallback: try to parse pure digit string
+        if let Some(ref first_line) = first_line_fallback {
+            if let Some(parsed) = crate::management_index::try_parse_digit_version(first_line) {
+                return Some(parsed);
+            }
+            // Last resort: return the first line as-is
+            return first_line_fallback;
+        }
+
+        None
+    }
+
+    fn read_version_files_from_7z_reader<R: std::io::Read + std::io::Seek>(
+        &self,
+        archive: &sevenz_rust2::Archive,
+        reader: &mut sevenz_rust2::ArchiveReader<R>,
+        internal_root: Option<&str>,
+    ) -> Option<(Option<String>, Vec<String>)> {
+        self.read_version_files_from_7z_reader_with_budget(archive, reader, internal_root, None)
+            .files_content
+    }
+
+    fn read_version_files_from_7z_reader_with_budget<R: std::io::Read + std::io::Seek>(
+        &self,
+        archive: &sevenz_rust2::Archive,
+        reader: &mut sevenz_rust2::ArchiveReader<R>,
+        internal_root: Option<&str>,
+        solid_scan_budget: Option<std::time::Duration>,
+    ) -> VersionFilesReadOutcome {
+        let plan = plan_version_file_reads(
+            archive.files.iter().filter_map(|entry| {
+                if entry.is_directory() || !entry.has_stream() {
+                    None
+                } else {
+                    Some((entry.name(), entry.size()))
+                }
+            }),
+            internal_root,
+        );
+
+        if plan.updater_cfg_path.is_none() && plan.version_file_paths.is_empty() {
+            return VersionFilesReadOutcome::default();
+        }
+
+        if archive.is_solid {
+            let budget_start = std::time::Instant::now();
+            let updater_cfg_target = plan.updater_cfg_path.clone();
+            let mut updater_cfg_processed = updater_cfg_target.is_none();
+            let mut updater_cfg_content: Option<String> = None;
+            let mut remaining_version_targets: HashSet<String> =
+                plan.version_file_paths.iter().cloned().collect();
+            let mut version_file_contents = Vec::new();
+            let mut timed_out = false;
+
+            let read_result = reader
+                .for_each_entries(|entry, entry_reader| {
+                    if solid_scan_budget
+                        .map(|budget| budget_start.elapsed() >= budget)
+                        .unwrap_or(false)
+                    {
+                        timed_out = true;
+                        return Ok(false);
+                    }
+
+                    let entry_name = entry.name();
+                    let is_updater_cfg = updater_cfg_target.as_deref() == Some(entry_name);
+                    let is_version_file = remaining_version_targets.contains(entry_name);
+
+                    if !is_updater_cfg && !is_version_file {
+                        return Ok(true);
+                    }
+
+                    let mut data = Vec::with_capacity(entry.size.min(10240) as usize);
+                    let content = if entry_reader.read_to_end(&mut data).is_ok() {
+                        String::from_utf8(data).ok()
+                    } else {
+                        None
+                    };
+
+                    if is_updater_cfg {
+                        updater_cfg_processed = true;
+                        updater_cfg_content = content;
+                    } else {
+                        remaining_version_targets.remove(entry_name);
+                        if let Some(content) = content {
+                            version_file_contents.push(content);
+                        }
+                    }
+
+                    let should_continue = updater_cfg_content.is_none()
+                        && !(updater_cfg_processed && remaining_version_targets.is_empty());
+                    Ok(should_continue)
+                })
+                .ok();
+
+            if read_result.is_none() {
+                return VersionFilesReadOutcome {
+                    files_content: None,
+                    timed_out,
+                };
+            }
+
+            if timed_out && updater_cfg_content.is_none() && version_file_contents.is_empty() {
+                return VersionFilesReadOutcome {
+                    files_content: None,
+                    timed_out: true,
+                };
+            }
+
+            if updater_cfg_content.is_some() || !version_file_contents.is_empty() {
+                return VersionFilesReadOutcome {
+                    files_content: Some((updater_cfg_content, version_file_contents)),
+                    timed_out,
+                };
+            }
+
+            return VersionFilesReadOutcome {
+                files_content: None,
+                timed_out,
+            };
+        }
+
+        let updater_cfg_content = plan.updater_cfg_path.as_deref().and_then(|path| {
+            reader
+                .read_file(path)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        });
+
+        if updater_cfg_content.is_some() {
+            return VersionFilesReadOutcome {
+                files_content: Some((updater_cfg_content, Vec::new())),
+                timed_out: false,
+            };
+        }
+
+        let version_file_contents: Vec<String> = plan
+            .version_file_paths
+            .into_iter()
+            .filter_map(|path| {
+                reader
+                    .read_file(&path)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            })
+            .collect();
+
+        if !version_file_contents.is_empty() {
+            VersionFilesReadOutcome {
+                files_content: Some((None, version_file_contents)),
+                timed_out: false,
+            }
+        } else {
+            VersionFilesReadOutcome::default()
+        }
+    }
+
+    fn read_version_from_7z_reader_with_budget<R: std::io::Read + std::io::Seek>(
+        &self,
+        archive: &sevenz_rust2::Archive,
+        reader: &mut sevenz_rust2::ArchiveReader<R>,
+        internal_root: Option<&str>,
+        solid_scan_budget: Option<std::time::Duration>,
+    ) -> VersionReadOutcome {
+        let outcome = self.read_version_files_from_7z_reader_with_budget(
+            archive,
+            reader,
+            internal_root,
+            solid_scan_budget,
+        );
+        let version_info = outcome.files_content.and_then(|version_files_content| {
+            let version =
+                self.parse_version_from_contents(version_files_content.0, version_files_content.1)?;
+            Some(crate::models::VersionInfo {
+                version: Some(version),
+            })
+        });
+
+        VersionReadOutcome {
+            version_info,
+            timed_out: outcome.timed_out,
+        }
+    }
+
+    fn infer_version_info_from_archive_context(
+        &self,
+        item: &DetectedItem,
+        archive_path: &Path,
+        archive_name_hint: Option<&str>,
+    ) -> Option<crate::models::VersionInfo> {
+        let candidates = [
+            Some(item.display_name.as_str()),
+            item.archive_internal_root.as_deref(),
+            archive_name_hint.and_then(|hint| {
+                Path::new(hint)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .or(Some(hint))
+            }),
+            archive_path.file_stem().and_then(|stem| stem.to_str()),
+        ];
+
+        for candidate in candidates.into_iter().flatten() {
+            if let Some(version) = infer_version_from_name(candidate) {
+                return Some(crate::models::VersionInfo {
+                    version: Some(version),
+                });
+            }
+        }
+
+        None
+    }
+
+    fn populate_version_info_from_7z_reader<R: std::io::Read + std::io::Seek>(
+        &self,
+        detected: &mut [DetectedItem],
+        archive: &sevenz_rust2::Archive,
+        reader: &mut sevenz_rust2::ArchiveReader<R>,
+        archive_path: &Path,
+        archive_name_hint: Option<&str>,
+    ) {
+        const SOLID_7Z_VERSION_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+        for item in detected.iter_mut() {
+            if !matches!(item.addon_type, AddonType::Aircraft | AddonType::Plugin) {
+                continue;
+            }
+
+            let version_outcome = self.read_version_from_7z_reader_with_budget(
+                archive,
+                reader,
+                item.archive_internal_root.as_deref(),
+                archive.is_solid.then_some(SOLID_7Z_VERSION_READ_BUDGET),
+            );
+
+            item.version_info = version_outcome.version_info.or_else(|| {
+                if version_outcome.timed_out {
+                    let inferred = self.infer_version_info_from_archive_context(
+                        item,
+                        archive_path,
+                        archive_name_hint,
+                    );
+
+                    if inferred.is_some() {
+                        crate::log_debug!(
+                            &format!(
+                                "[TIMING] 7z version read timed out, inferred from filename/context: {}",
+                                item.display_name
+                            ),
+                            "scanner_timing"
+                        );
+                    }
+
+                    inferred
+                } else {
+                    None
+                }
+            });
+        }
+    }
+
+    /// Read a file from a ZIP archive
+    fn read_file_from_zip(&self, archive_path: &Path, file_path: &str) -> Result<String> {
+        use std::io::Read;
+
+        let prepared = prepare_archive_for_read(archive_path, ArchiveFormat::Zip)?;
+        let file = fs::File::open(prepared.read_path())?;
+        let mut archive = ::zip::ZipArchive::new(file)?;
+
+        let mut zip_file = archive.by_name(file_path)?;
+        let mut content = String::new();
+        zip_file.read_to_string(&mut content)?;
+
+        Ok(content)
+    }
+
+    /// List all entries in a ZIP archive
+    fn list_zip_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
+        let prepared = prepare_archive_for_read(archive_path, ArchiveFormat::Zip)?;
+        let file = fs::File::open(prepared.read_path())?;
+        let archive = ::zip::ZipArchive::new(file)?;
+
+        let entries: Vec<String> = (0..archive.len())
+            .filter_map(|i| archive.name_for_index(i).map(|s| s.to_string()))
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Read a file from a 7z archive (wrapper for companion detection)
+    fn read_file_from_7z_no_password(
+        &self,
+        archive_path: &Path,
+        file_path: &str,
+    ) -> Result<String> {
+        // Call the existing function with None password
+        self.read_file_from_7z(archive_path, file_path, None)
+    }
+
+    /// List all entries in a 7z archive
+    fn list_7z_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
+        let prepared = prepare_archive_for_read(archive_path, ArchiveFormat::SevenZ)?;
+        let archive = sevenz_rust2::Archive::open(prepared.read_path())?;
+        Ok(archive
+            .files
+            .iter()
+            .filter(|entry| !entry.is_directory() && entry.has_stream())
+            .map(|entry| entry.name().replace('\\', "/"))
+            .collect())
+    }
+
+    /// Read a file from a RAR archive (wrapper for companion detection)
+    fn read_file_from_rar_no_password(
+        &self,
+        archive_path: &Path,
+        file_path: &str,
+    ) -> Result<String> {
+        // Call the existing function with None password
+        self.read_file_from_rar(archive_path, file_path, None)
+    }
+
+    /// List all entries in a RAR archive
+    fn list_rar_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
+        use unrar::Archive;
+
+        let normalized = crate::archive_input::normalize_archive_entry_path(archive_path);
+        let mut archive = Archive::new(&normalized).open_for_listing()?;
+        let mut entries = Vec::new();
+
+        while let Some(header) = archive.read_header()? {
+            let entry = header.entry();
+            if !entry.is_directory() {
+                entries.push(entry.filename.to_string_lossy().to_string());
+            }
+            archive = header.skip()?;
+        }
+
+        Ok(entries)
+    }
+
+    /// Read version files from a ZIP archive
+    /// Returns (updater_cfg_content, version_file_contents)
+    fn read_version_files_from_zip(
+        &self,
+        archive_path: &Path,
+        internal_root: Option<&str>,
+    ) -> Option<(Option<String>, Vec<String>)> {
+        use std::io::Read;
+
+        let prepared = prepare_archive_for_read(archive_path, ArchiveFormat::Zip).ok()?;
+        let file = fs::File::open(prepared.read_path()).ok()?;
+        let mut archive = ::zip::ZipArchive::new(file).ok()?;
+
+        let mut updater_cfg_content: Option<String> = None;
+        let mut version_files_by_depth: Vec<(usize, String)> = Vec::new();
+
+        // Determine search prefix based on internal_root
+        let search_prefix = internal_root.map(|r| {
+            if r.ends_with('/') {
+                r.to_string()
+            } else {
+                format!("{}/", r)
+            }
+        });
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).ok()?;
+            let file_path = file.name().to_string();
+
+            // Skip if not in internal_root
+            if let Some(ref prefix) = search_prefix {
+                if !file_path.starts_with(prefix) {
+                    continue;
+                }
+            }
+
+            // Get relative path from internal_root
+            let relative_path = if let Some(ref prefix) = search_prefix {
+                file_path.strip_prefix(prefix).unwrap_or(&file_path)
+            } else {
+                &file_path
+            };
+
+            // Calculate depth (number of slashes = directory levels)
+            let depth = relative_path.matches('/').count();
+
+            // Skip if too deep (max 2 levels to avoid scanning entire subdirectories)
+            if depth > 2 {
+                continue;
+            }
+
+            let file_name = Path::new(relative_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let file_name_lower = file_name.to_lowercase();
+
+            // Check if this is a version file
+            let is_updater_cfg = file_name == "skunkcrafts_updater.cfg";
+            let is_version_file = file_name_lower.contains("version")
+                || file_name == "767.ini"
+                || file_name == "757.ini";
+
+            if is_updater_cfg || is_version_file {
+                // Read file content (limit to 10KB for safety)
+                if file.size() > 10240 {
+                    continue;
+                }
+
+                let mut content = String::new();
+                if file.read_to_string(&mut content).is_ok() {
+                    if is_updater_cfg {
+                        updater_cfg_content = Some(content);
+                    } else {
+                        // Store with depth for priority sorting
+                        version_files_by_depth.push((depth, content));
+                    }
+                }
+            }
+        }
+
+        // Sort by depth (shallowest first) and take only the shallowest level
+        if !version_files_by_depth.is_empty() {
+            version_files_by_depth.sort_by_key(|(depth, _)| *depth);
+            let min_depth = version_files_by_depth[0].0;
+
+            // Only keep files from the shallowest depth
+            let version_file_contents: Vec<String> = version_files_by_depth
+                .into_iter()
+                .filter(|(depth, _)| *depth == min_depth)
+                .map(|(_, content)| content)
+                .collect();
+
+            if updater_cfg_content.is_some() || !version_file_contents.is_empty() {
+                return Some((updater_cfg_content, version_file_contents));
+            }
+        }
+
+        if updater_cfg_content.is_some() {
+            Some((updater_cfg_content, Vec::new()))
+        } else {
+            None
+        }
+    }
+
+    /// Read version files from a 7z archive
+    fn read_version_files_from_7z(
+        &self,
+        archive_path: &Path,
+        internal_root: Option<&str>,
+    ) -> Option<(Option<String>, Vec<String>)> {
+        use sevenz_rust2::{ArchiveReader, Password};
+
+        let prepared = prepare_archive_for_read(archive_path, ArchiveFormat::SevenZ).ok()?;
+        let mut reader = ArchiveReader::open(prepared.read_path(), Password::empty()).ok()?;
+        let archive = reader.archive().clone();
+        self.read_version_files_from_7z_reader(&archive, &mut reader, internal_root)
+    }
+
+    /// Read version files from a RAR archive
+    fn read_version_files_from_rar(
+        &self,
+        archive_path: &Path,
+        internal_root: Option<&str>,
+    ) -> Option<(Option<String>, Vec<String>)> {
+        use tempfile::Builder;
+        use unrar::Archive;
+
+        // Create temp directory for extraction
+        let temp_dir = Builder::new().prefix("xfi_version_").tempdir().ok()?;
+
+        let normalized_archive = crate::archive_input::normalize_archive_entry_path(archive_path);
+        let mut archive = Archive::new(&normalized_archive)
+            .open_for_processing()
+            .ok()?;
+
+        let search_prefix = internal_root.map(|r| {
+            if r.ends_with('/') {
+                r.to_string()
+            } else {
+                format!("{}/", r)
+            }
+        });
+
+        let mut files_to_read: Vec<(usize, PathBuf)> = Vec::new();
+
+        // First pass: identify and extract version files
+        while let Some(header) = archive.read_header().ok().flatten() {
+            let file_path = header.entry().filename.to_string_lossy().to_string();
+
+            // Skip directories
+            if header.entry().is_directory() {
+                archive = header.skip().ok()?;
+                continue;
+            }
+
+            // Skip if not in internal_root
+            if let Some(ref prefix) = search_prefix {
+                if !file_path.starts_with(prefix) {
+                    archive = header.skip().ok()?;
+                    continue;
+                }
+            }
+
+            let relative_path = if let Some(ref prefix) = search_prefix {
+                file_path.strip_prefix(prefix).unwrap_or(&file_path)
+            } else {
+                &file_path
+            };
+
+            // Calculate depth
+            let depth = relative_path.matches('/').count();
+
+            // Skip if too deep
+            if depth > 2 {
+                archive = header.skip().ok()?;
+                continue;
+            }
+
+            let file_name = Path::new(relative_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let file_name_lower = file_name.to_lowercase();
+
+            let is_updater_cfg = file_name == "skunkcrafts_updater.cfg";
+            let is_version_file = file_name_lower.contains("version")
+                || file_name == "767.ini"
+                || file_name == "757.ini";
+
+            if is_updater_cfg || is_version_file {
+                if header.entry().unpacked_size > 10240 {
+                    archive = header.skip().ok()?;
+                    continue;
+                }
+
+                // Extract this file
+                archive = header.extract_with_base(temp_dir.path()).ok()?;
+                files_to_read.push((depth, temp_dir.path().join(&file_path)));
+            } else {
+                archive = header.skip().ok()?;
+            }
+        }
+
+        // Second pass: read extracted files, prioritizing by depth
+        let mut updater_cfg_content: Option<String> = None;
+        let mut version_files_by_depth: Vec<(usize, String)> = Vec::new();
+
+        for (depth, file_path) in files_to_read {
+            if let Ok(content) = fs::read_to_string(&file_path) {
+                let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+                if file_name == "skunkcrafts_updater.cfg" {
+                    updater_cfg_content = Some(content);
+                } else {
+                    version_files_by_depth.push((depth, content));
+                }
+            }
+        }
+
+        // Sort by depth and keep only the shallowest level
+        if !version_files_by_depth.is_empty() {
+            version_files_by_depth.sort_by_key(|(depth, _)| *depth);
+            let min_depth = version_files_by_depth[0].0;
+
+            let version_file_contents: Vec<String> = version_files_by_depth
+                .into_iter()
+                .filter(|(depth, _)| *depth == min_depth)
+                .map(|(_, content)| content)
+                .collect();
+
+            if updater_cfg_content.is_some() || !version_file_contents.is_empty() {
+                return Some((updater_cfg_content, version_file_contents));
+            }
+        }
+
+        if updater_cfg_content.is_some() {
+            Some((updater_cfg_content, Vec::new()))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        infer_version_from_name, plan_version_file_reads, resolve_nested_display_name, AddonType,
+        Scanner, VersionFileReadPlan,
+    };
+    use std::fs;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn nested_archive_display_name_preserves_detected_name() {
+        assert_eq!(
+            resolve_nested_display_name(
+                "AT98WolfsFang",
+                "JPN Airports/XP12 Tsulon&hana RJFT v1.15.rar"
+            ),
+            "AT98WolfsFang"
+        );
+    }
+
+    #[test]
+    fn nested_archive_display_name_falls_back_for_unknown_name() {
+        assert_eq!(
+            resolve_nested_display_name(
+                "Unknown Scenery",
+                "JPN Airports/XP12 Tsulon&hana RJFT v1.15.rar"
+            ),
+            "XP12 Tsulon&hana RJFT v1.15"
+        );
+    }
+
+    #[test]
+    fn nested_archive_display_name_falls_back_for_blank_name() {
+        assert_eq!(
+            resolve_nested_display_name("", "nested/airport_package.zip"),
+            "airport_package"
+        );
+    }
+
+    #[test]
+    fn version_read_plan_keeps_only_shallowest_matching_version_files() {
+        let plan = plan_version_file_reads(
+            [
+                ("Aircraft/version.txt", 128),
+                ("Aircraft/767.ini", 64),
+                ("Aircraft/plugins/64/version.txt", 256),
+                ("Aircraft/docs/version.txt", 512),
+                ("Other/version.txt", 128),
+                ("Aircraft/too-big-version.txt", 16384),
+            ],
+            Some("Aircraft"),
+        );
+
+        assert_eq!(
+            plan,
+            VersionFileReadPlan {
+                updater_cfg_path: None,
+                version_file_paths: vec![
+                    "Aircraft/version.txt".to_string(),
+                    "Aircraft/767.ini".to_string(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn version_read_plan_prefers_shallowest_updater_cfg_and_filters_depth() {
+        let plan = plan_version_file_reads(
+            [
+                ("Aircraft/plugins/skunkcrafts_updater.cfg", 256),
+                ("Aircraft/skunkcrafts_updater.cfg", 128),
+                ("Aircraft/config/deeper/skunkcrafts_updater.cfg", 64),
+                ("Aircraft/sub/version.txt", 64),
+            ],
+            Some("Aircraft"),
+        );
+
+        assert_eq!(
+            plan,
+            VersionFileReadPlan {
+                updater_cfg_path: Some("Aircraft/skunkcrafts_updater.cfg".to_string()),
+                version_file_paths: vec!["Aircraft/sub/version.txt".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn infer_version_from_name_supports_v_dot_stage_patterns() {
+        assert_eq!(
+            infer_version_from_name("737NG Series_V2.S1"),
+            Some("V2.S1".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_version_from_name_ignores_plain_model_numbers() {
+        assert_eq!(infer_version_from_name("737NG Series"), None);
+    }
+
+    #[test]
+    fn direct_lua_detection_infers_sibling_resource_folder() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let root = temp.path();
+        let resources = root.join("SimLoadManager");
+        fs::create_dir_all(&resources).expect("failed to create resources");
+        fs::write(root.join("SimLoadManager.lua"), "print('ok')\n").expect("failed to write lua");
+        fs::write(resources.join("settings.json"), "{}").expect("failed to write resource");
+
+        let scanner = Scanner::new();
+        let item = scanner
+            .check_lua_script(&root.join("SimLoadManager.lua"), root)
+            .expect("lua detection should not fail")
+            .expect("lua script should be detected");
+
+        assert_eq!(item.addon_type, AddonType::LuaScript);
+        assert_eq!(item.companion_paths, vec!["SimLoadManager".to_string()]);
+    }
+
+    #[test]
+    fn zip_lua_detection_infers_sibling_resource_folder_without_script_directory() {
+        let temp = tempdir().expect("failed to create tempdir");
+        let zip_path = temp.path().join("simload.zip");
+        {
+            let file = fs::File::create(&zip_path).expect("failed to create zip");
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::FileOptions::<()>::default();
+            writer
+                .start_file("SimLoadManager.lua", options)
+                .expect("failed to add lua");
+            writer
+                .write_all(b"print('ok')\n")
+                .expect("failed to write lua");
+            writer
+                .add_directory("SimLoadManager/", options)
+                .expect("failed to add resource dir");
+            writer
+                .start_file("SimLoadManager/settings.json", options)
+                .expect("failed to add resource file");
+            writer
+                .write_all(b"{}")
+                .expect("failed to write resource file");
+            writer.finish().expect("failed to finish zip");
+        }
+
+        let scanner = Scanner::new();
+        let items = scanner
+            .scan_archive(&zip_path, None)
+            .expect("zip scan should succeed");
+        let lua = items
+            .iter()
+            .find(|item| item.addon_type == AddonType::LuaScript)
+            .expect("lua script should be detected");
+
+        assert_eq!(lua.companion_paths, vec!["SimLoadManager".to_string()]);
+    }
+}

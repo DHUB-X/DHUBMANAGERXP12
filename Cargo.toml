@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri"]
+
+[profile.release]
+opt-level = 3          # Optimize for speed (fastest runtime performance)
+lto = "fat"            # Full link-time optimization (best performance)
+codegen-units = 1      # Single codegen unit (better optimization)
+strip = "debuginfo"    # Strip debug info only (keep symbols needed by Tauri)
+panic = "abort"        # Abort on panic (smaller binary, faster)
