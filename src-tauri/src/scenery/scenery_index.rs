@@ -295,7 +295,25 @@ fn resolve_package_dir(custom_scenery_path: &Path, info: &SceneryPackageInfo) ->
     custom_scenery_path.join(&info.folder_name)
 }
 
+fn is_special_scenery_package(folder_name: &str) -> bool {
+    let lower = folder_name.to_lowercase();
+    let trimmed = lower.trim();
+    trimmed.starts_with("x-plane airports")
+        || trimmed.starts_with("xplane airports")
+        || trimmed.starts_with("x-plane landmarks")
+        || trimmed.starts_with("xplane landmarks")
+        || trimmed.starts_with("aep overlay")
+        || trimmed.starts_with("aep_overlay")
+        || trimmed.starts_with("aep-overlay")
+        || trimmed == "global airports"
+        || trimmed == "*global_airports*"
+}
+
 fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<String> {
+    if is_special_scenery_package(name) {
+        return None;
+    }
+
     const NOISE_WORDS: &[&str] = &[
         "XP11", "XP12", "MESH", "INTL", "CITY", "ROAD", "ROADS", "SFD", "AERO", "TAIM",
         "PACK", "APTS", "DEMO", "SCEN", "PART", "FLAT", "FREE", "BASE", "FULL",
@@ -327,43 +345,23 @@ fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<Str
     None
 }
 
-fn associate_companion_airport_packages(packages: &mut [SceneryPackageInfo]) {
-    let mut airport_icao_map: Vec<(String, String)> = Vec::new();
-    for pkg in packages.iter() {
-        if pkg.category == SceneryCategory::Airport {
-            if let Some(icao) = extract_airport_icao_key(&pkg.folder_name, pkg) {
-                airport_icao_map.push((pkg.folder_name.clone(), icao));
-            }
+fn resolve_sort_icao(
+    name: &str,
+    info: &SceneryPackageInfo,
+    prefix_to_icao: &HashMap<String, String>,
+) -> Option<String> {
+    if is_special_scenery_package(name) {
+        return None;
+    }
+    if let Some(icao) = extract_airport_icao_key(name, info) {
+        return Some(icao);
+    }
+    if let Some(prefix) = extract_scenery_prefix(name) {
+        if let Some(icao) = prefix_to_icao.get(&prefix.to_lowercase()) {
+            return Some(icao.clone());
         }
     }
-
-    for pkg in packages.iter_mut() {
-        if pkg.category == SceneryCategory::Airport && pkg.airport_id.is_none() {
-            let lower = pkg.folder_name.to_lowercase();
-            for (known_name, icao) in &airport_icao_map {
-                if known_name == &pkg.folder_name {
-                    continue;
-                }
-                if let (Some(p1), Some(p2)) = (
-                    extract_scenery_prefix(&pkg.folder_name),
-                    extract_scenery_prefix(known_name),
-                ) {
-                    if p1.eq_ignore_ascii_case(&p2) {
-                        pkg.airport_id = Some(icao.clone());
-                        break;
-                    }
-                }
-                let known_tokens: Vec<&str> = known_name
-                    .split(|c: char| !c.is_ascii_alphanumeric())
-                    .filter(|s| s.len() >= 4 && !s.chars().all(|c| c.is_ascii_digit()))
-                    .collect();
-                if known_tokens.iter().any(|tok| lower.contains(&tok.to_lowercase())) {
-                    pkg.airport_id = Some(icao.clone());
-                    break;
-                }
-            }
-        }
-    }
+    None
 }
 
 fn compare_packages_for_sorting(
@@ -371,6 +369,7 @@ fn compare_packages_for_sorting(
     info_a: &SceneryPackageInfo,
     name_b: &str,
     info_b: &SceneryPackageInfo,
+    prefix_to_icao: &HashMap<String, String>,
 ) -> std::cmp::Ordering {
     let sub_a = if info_a.category == SceneryCategory::Airport {
         calculate_sub_priority(&info_a.category, name_a)
@@ -434,8 +433,8 @@ fn compare_packages_for_sorting(
                 && sub_a == 0
                 && sub_b == 0
             {
-                let icao_a = extract_airport_icao_key(name_a, info_a);
-                let icao_b = extract_airport_icao_key(name_b, info_b);
+                let icao_a = resolve_sort_icao(name_a, info_a, prefix_to_icao);
+                let icao_b = resolve_sort_icao(name_b, info_b, prefix_to_icao);
 
                 match (&icao_a, &icao_b) {
                     (Some(a), Some(b)) => match a.cmp(b) {
@@ -643,7 +642,17 @@ fn sort_packages_with_special_rules(
     xplane_path: &Path,
     packages: &mut Vec<SceneryPackageInfo>,
 ) -> bool {
-    associate_companion_airport_packages(packages);
+    let mut prefix_to_icao: HashMap<String, String> = HashMap::new();
+    for pkg in packages.iter() {
+        if pkg.category == SceneryCategory::Airport && !is_special_scenery_package(&pkg.folder_name) {
+            if let Some(icao) = extract_airport_icao_key(&pkg.folder_name, pkg) {
+                if let Some(prefix) = extract_scenery_prefix(&pkg.folder_name) {
+                    prefix_to_icao.entry(prefix.to_lowercase()).or_insert(icao);
+                }
+            }
+        }
+    }
+
     let airport_mesh_matches = detect_airport_mesh_matches_with_path(xplane_path, packages);
     let category_changed = apply_airport_mesh_matches(packages, &airport_mesh_matches);
 
@@ -661,7 +670,7 @@ fn sort_packages_with_special_rules(
     fixed_packages
         .sort_by(|a, b| compare_fixed_high_priority_packages(&a.folder_name, a, &b.folder_name, b));
     other_packages
-        .sort_by(|a, b| compare_packages_for_sorting(&a.folder_name, a, &b.folder_name, b));
+        .sort_by(|a, b| compare_packages_for_sorting(&a.folder_name, a, &b.folder_name, b, &prefix_to_icao));
 
     fixed_packages.extend(other_packages);
     apply_darkblue_airport_package_anchors(&mut fixed_packages, &airport_mesh_matches);
@@ -2484,7 +2493,7 @@ fn detect_duplicate_airports(
     // Build map: airport_id -> Vec<folder_name> (only for enabled packages)
     let mut id_map: HashMap<String, Vec<String>> = HashMap::new();
     for (folder_name, info) in packages {
-        if !info.enabled {
+        if !info.enabled || is_special_scenery_package(folder_name) {
             continue;
         }
         if let Some(ref airport_id) = info.airport_id {

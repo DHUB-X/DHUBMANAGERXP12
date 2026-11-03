@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.2] - 2026-11-03
+
+### Fixed
+- Fixed false duplicate airport warnings on X-Plane default landmarks and special sceneries
+- Scenery companion sorting no longer mutates persistent package airport identifiers
+
+### Changed
+- Styled ICAO prefix font to match scenery title typography for clearer readability
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

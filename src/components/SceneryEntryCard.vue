@@ -551,19 +551,15 @@ function handleContextMenu(event: MouseEvent) {
     />
 
     <!-- Folder name with optional [ ICAO ] -->
-    <div class="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+    <div
+      class="flex-1 min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
+      :title="displayIcao ? `[ ${displayIcao} ] ${entry.folderName}` : entry.folderName"
+    >
       <span
         v-if="displayIcao"
-        class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-bold font-mono bg-sky-500/15 border border-sky-400/30 text-sky-600 dark:text-sky-300 shrink-0"
-      >
-        [ {{ displayIcao }} ]
-      </span>
-      <div
-        class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
-        :title="displayIcao ? `[ ${displayIcao} ] ${entry.folderName}` : entry.folderName"
-      >
-        {{ entry.folderName }}
-      </div>
+        class="text-sm font-semibold text-sky-600 dark:text-sky-400 mr-2 select-all"
+      >[ {{ displayIcao }} ]</span>
+      <span>{{ entry.folderName }}</span>
     </div>
 
     <!-- Missing dependencies warning (before category badge) -->
