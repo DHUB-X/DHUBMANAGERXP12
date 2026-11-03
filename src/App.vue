@@ -524,11 +524,11 @@ const NAV_USAGE_STORAGE_KEY = 'dhub.navUsageCounts'
 const DEFAULT_NAV_ORDER: NavId[] = [
   'home',
   'management',
-  'screenshots',
-  'log-analysis',
   'stutter-detector',
   'activity',
   'disk-usage',
+  'screenshots',
+  'log-analysis',
   'presets',
   'gateway',
   'airport-flatten',
@@ -758,7 +758,7 @@ function buildNavOrderFromCounts(counts: NavUsageCounts): NavId[] {
 }
 
 function loadStartupNavOrder(): NavId[] {
-  return buildNavOrderFromCounts(readNavUsageCounts())
+  return [...DEFAULT_NAV_ORDER]
 }
 
 function recordNavClick(id: NavId) {

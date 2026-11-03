@@ -200,7 +200,7 @@
 
         <!-- Inner Action Area: Toggle between Drop Zone and Progress Overlays -->
         <div
-          class="flex-1 min-h-0 bg-slate-900/40 dark:bg-slate-900/50 border-2 border-dashed border-sky-400/25 dark:border-sky-500/20 rounded-xl p-3 sm:p-4 text-center transition-all duration-200 hover:border-sky-400/60 dark:hover:border-sky-400/60 hover:bg-sky-500/5 flex flex-col items-center justify-center relative drop-zone-card group overflow-y-auto"
+          class="flex-1 min-h-0 bg-sky-50/50 dark:bg-slate-900/50 border-2 border-dashed border-sky-300/60 dark:border-sky-500/20 rounded-xl p-3 sm:p-4 text-center transition-all duration-200 hover:border-sky-400 dark:hover:border-sky-400/60 hover:bg-sky-500/5 flex flex-col items-center justify-center relative drop-zone-card group overflow-y-auto"
           :class="{
             'drag-over ring-4 ring-sky-500/20 border-sky-500 scale-[1.01]': isDragging,
             'animate-pulse border-sky-400': store.isAnalyzing,
@@ -209,10 +209,10 @@
           @click="handleDropZoneClick"
         >
           <!-- Subtle Aerospace Corner Markers -->
-          <div class="absolute top-2.5 left-2.5 w-2.5 h-2.5 border-t-2 border-l-2 border-sky-400/30 rounded-tl-sm pointer-events-none transition-colors group-hover:border-sky-400/70"></div>
-          <div class="absolute top-2.5 right-2.5 w-2.5 h-2.5 border-t-2 border-r-2 border-sky-400/30 rounded-tr-sm pointer-events-none transition-colors group-hover:border-sky-400/70"></div>
-          <div class="absolute bottom-2.5 left-2.5 w-2.5 h-2.5 border-b-2 border-l-2 border-sky-400/30 rounded-bl-sm pointer-events-none transition-colors group-hover:border-sky-400/70"></div>
-          <div class="absolute bottom-2.5 right-2.5 w-2.5 h-2.5 border-b-2 border-r-2 border-sky-400/30 rounded-br-sm pointer-events-none transition-colors group-hover:border-sky-400/70"></div>
+          <div class="absolute top-2.5 left-2.5 w-2.5 h-2.5 border-t-2 border-l-2 border-sky-400/50 dark:border-sky-400/30 rounded-tl-sm pointer-events-none transition-colors group-hover:border-sky-500 dark:group-hover:border-sky-400/70"></div>
+          <div class="absolute top-2.5 right-2.5 w-2.5 h-2.5 border-t-2 border-r-2 border-sky-400/50 dark:border-sky-400/30 rounded-tr-sm pointer-events-none transition-colors group-hover:border-sky-500 dark:group-hover:border-sky-400/70"></div>
+          <div class="absolute bottom-2.5 left-2.5 w-2.5 h-2.5 border-b-2 border-l-2 border-sky-400/50 dark:border-sky-400/30 rounded-bl-sm pointer-events-none transition-colors group-hover:border-sky-500 dark:group-hover:border-sky-400/70"></div>
+          <div class="absolute bottom-2.5 right-2.5 w-2.5 h-2.5 border-b-2 border-r-2 border-sky-400/50 dark:border-sky-400/30 rounded-br-sm pointer-events-none transition-colors group-hover:border-sky-500 dark:group-hover:border-sky-400/70"></div>
 
           <!-- Main Area Content: Toggle between Drop Zone and Progress Overlays -->
           <transition name="fade" mode="out-in">
@@ -227,7 +227,7 @@
                 class="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-sky-500/10 to-blue-600/10 dark:from-sky-500/20 dark:to-blue-600/15 border border-sky-400/20 dark:border-sky-400/25 flex items-center justify-center group-hover:scale-105 transition-all duration-200 relative shadow-sm"
               >
                 <svg
-                  class="w-5 h-5 sm:w-6 sm:h-6 text-sky-400 transition-transform duration-200 group-hover:translate-y-[-2px]"
+                  class="w-5 h-5 sm:w-6 sm:h-6 text-sky-500 dark:text-sky-400 transition-transform duration-200 group-hover:translate-y-[-2px]"
                   :class="{ 'animate-bounce': isDragging }"
                   fill="none"
                   stroke="currentColor"
@@ -249,7 +249,7 @@
                 >
                   <AnimatedText>{{ $t('home.dropFilesHere') }}</AnimatedText>
                 </h2>
-                <p class="text-slate-400 max-w-md mx-auto text-xs leading-relaxed">
+                <p class="text-slate-500 dark:text-slate-400 max-w-md mx-auto text-xs leading-relaxed font-normal">
                   <AnimatedText>{{ $t('home.supportedFormats') }}</AnimatedText>
                 </p>
               </div>
@@ -257,7 +257,7 @@
               <!-- Modern Feature Badges -->
               <div class="flex flex-wrap justify-center gap-1.5 pt-0.5">
                 <span
-                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400"
+                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400/70"
                 >
                   <svg
                     class="w-3 h-3 text-sky-400"
@@ -275,7 +275,7 @@
                   <span><AnimatedText>{{ $t('home.autoDetect') }}</AnimatedText></span>
                 </span>
                 <span
-                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400"
+                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400/70"
                 >
                   <svg
                     class="w-3 h-3 text-sky-400"
@@ -293,7 +293,7 @@
                   <span><AnimatedText>{{ $t('home.fastInstall') }}</AnimatedText></span>
                 </span>
                 <span
-                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400"
+                  class="px-2.5 py-1 rounded-lg bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 text-[11px] font-medium flex items-center space-x-1.5 shadow-xs transition hover:border-sky-400/70"
                 >
                   <svg
                     class="w-3 h-3 text-blue-400"
@@ -316,10 +316,10 @@
               <div class="flex items-center gap-2.5 pt-1">
                 <button
                   type="button"
-                  class="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-white/10 dark:hover:bg-white/15 text-slate-700 dark:text-white font-medium text-xs rounded-xl border border-slate-300 dark:border-white/15 hover:border-sky-400 transition-all duration-200 flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                  class="px-3.5 py-1.5 bg-white hover:bg-slate-50 dark:bg-white/10 dark:hover:bg-white/15 text-slate-700 dark:text-white font-medium text-xs rounded-xl border border-slate-200 dark:border-white/15 hover:border-sky-400/80 transition-all duration-200 flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
                   @click.stop="handleDropZoneClick"
                 >
-                  <svg class="w-3.5 h-3.5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-3.5 h-3.5 text-sky-500 dark:text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                   </svg>
                   <span>Browse Addons</span>

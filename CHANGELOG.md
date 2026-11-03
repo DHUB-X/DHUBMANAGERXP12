@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-03
+
+### Initial Release
+
+- **DHUB Manager XP12 Launch** - Official modern addon installer & manager for X-Plane 12 by DHUB Aviation.
+- **Flight Deck & Installation Depot** - Drag-and-drop auto-detection and high-speed parallel installer.
+- **Modernized Disk Space Analysis Dashboard** - Interactive donut distribution chart with detailed category metrics.
+- **Stutter Doctor & Performance Analysis** - Real-time flight log and stutter diagnostics.
+- **Integrated Addon Management** - Comprehensive management for aircraft, plugins, sceneries, liveries, and X-CSL.
+- **In-App Update Controls** - Automated update checking with 1-click update support.
+- **Dual Windows Installers** - NSIS standalone installer and MSI package.
+
 ## [1.3.2] - 2026-11-03
 
 ### Added
