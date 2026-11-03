@@ -109,7 +109,7 @@ function normalizeCustomGroupConfig(value: unknown): SceneryCustomGroupConfig {
 }
 
 function getCustomGroupConfigPathKey(xplanePath: string): string {
-  return xplanePath.trim().replaceAll('\\', '/')
+  return xplanePath.trim().replace(/\\/g, '/')
 }
 
 export const useSceneryStore = defineStore('scenery', () => {

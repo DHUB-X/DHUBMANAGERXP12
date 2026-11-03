@@ -577,7 +577,7 @@ const showConfirmation = ref(false)
 const showLaunchConfirmDialog = ref(false)
 const isLaunchingXPlane = ref(false)
 const isXPlaneRunning = ref(false)
-const xpVersionName = computed(() => store.xplaneVersion ? `X-Plane ${store.xplaneVersion}` : 'X-Plane 12')
+const xpVersionName = 'X-Plane 12'
 let xplaneCheckInterval: number | null = null
 const debugDropFlash = ref(false)
 
