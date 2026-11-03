@@ -168,6 +168,48 @@ const assignedCustomGroup = computed(() =>
 )
 
 // Lock state
+const NOISE_WORDS = new Set([
+  'XP11', 'XP12', 'MESH', 'INTL', 'CITY', 'ROAD', 'ROADS', 'SFD', 'AERO', 'TAIM',
+  'PACK', 'APTS', 'DEMO', 'SCEN', 'PART', 'FLAT', 'FREE', 'BASE', 'FULL',
+  'AIRP', 'PARK', 'HIGH', 'WIDE', 'DEPO', 'APRO', 'TERM'
+])
+
+const isSpecialAirport = computed(() => {
+  const name = props.entry.folderName.toLowerCase().trim()
+  return (
+    name.startsWith('x-plane airports') ||
+    name.startsWith('xplane airports') ||
+    name.startsWith('x-plane landmarks') ||
+    name.startsWith('xplane landmarks') ||
+    name.startsWith('aep overlay') ||
+    name.startsWith('aep_overlay') ||
+    name.startsWith('aep-overlay') ||
+    name === 'global airports' ||
+    name === GLOBAL_AIRPORTS_ENTRY_NAME.toLowerCase()
+  )
+})
+
+const displayIcao = computed(() => {
+  if (isSpecialAirport.value) return null
+  if (props.entry.category !== 'Airport') return null
+
+  if (props.entry.airportId) {
+    const trimmed = props.entry.airportId.trim().toUpperCase()
+    if (trimmed.length >= 3 && trimmed.length <= 5 && !NOISE_WORDS.has(trimmed)) {
+      return trimmed
+    }
+  }
+
+  const tokens = props.entry.folderName.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
+  for (const token of tokens) {
+    if (token.length === 4 && /^[A-Z]{4}$/.test(token) && !NOISE_WORDS.has(token)) {
+      return token
+    }
+  }
+
+  return null
+})
+
 const isItemLocked = computed(() => lockStore.isLocked('scenery', props.entry.folderName))
 
 function handleToggleLock() {
@@ -508,11 +550,17 @@ function handleContextMenu(event: MouseEvent) {
       @update:model-value="emit('toggle-enabled', entry.folderName)"
     />
 
-    <!-- Folder name -->
-    <div class="flex-1 min-w-0">
+    <!-- Folder name with optional [ ICAO ] -->
+    <div class="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+      <span
+        v-if="displayIcao"
+        class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-bold font-mono bg-sky-500/15 border border-sky-400/30 text-sky-600 dark:text-sky-300 shrink-0"
+      >
+        [ {{ displayIcao }} ]
+      </span>
       <div
         class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
-        :title="entry.folderName"
+        :title="displayIcao ? `[ ${displayIcao} ] ${entry.folderName}` : entry.folderName"
       >
         {{ entry.folderName }}
       </div>

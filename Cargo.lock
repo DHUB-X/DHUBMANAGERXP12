@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "dhub-manager"
-version = "1.3.2"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",

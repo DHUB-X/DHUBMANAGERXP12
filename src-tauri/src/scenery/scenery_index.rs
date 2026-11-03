@@ -295,6 +295,77 @@ fn resolve_package_dir(custom_scenery_path: &Path, info: &SceneryPackageInfo) ->
     custom_scenery_path.join(&info.folder_name)
 }
 
+fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<String> {
+    const NOISE_WORDS: &[&str] = &[
+        "XP11", "XP12", "MESH", "INTL", "CITY", "ROAD", "ROADS", "SFD", "AERO", "TAIM",
+        "PACK", "APTS", "DEMO", "SCEN", "PART", "FLAT", "FREE", "BASE", "FULL",
+        "AIRP", "PARK", "HIGH", "WIDE", "DEPO", "APRO", "TERM",
+    ];
+
+    if let Some(ref id) = info.airport_id {
+        let trimmed = id.trim().to_uppercase();
+        if trimmed.len() >= 3 && trimmed.len() <= 5 && !NOISE_WORDS.contains(&trimmed.as_str()) {
+            return Some(trimmed);
+        }
+    }
+
+    let upper = name.to_uppercase();
+    let tokens: Vec<&str> = upper
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for token in tokens {
+        if token.len() == 4
+            && token.chars().all(|c| c.is_ascii_alphabetic())
+            && !NOISE_WORDS.contains(&token)
+        {
+            return Some(token.to_string());
+        }
+    }
+
+    None
+}
+
+fn associate_companion_airport_packages(packages: &mut [SceneryPackageInfo]) {
+    let mut airport_icao_map: Vec<(String, String)> = Vec::new();
+    for pkg in packages.iter() {
+        if pkg.category == SceneryCategory::Airport {
+            if let Some(icao) = extract_airport_icao_key(&pkg.folder_name, pkg) {
+                airport_icao_map.push((pkg.folder_name.clone(), icao));
+            }
+        }
+    }
+
+    for pkg in packages.iter_mut() {
+        if pkg.category == SceneryCategory::Airport && pkg.airport_id.is_none() {
+            let lower = pkg.folder_name.to_lowercase();
+            for (known_name, icao) in &airport_icao_map {
+                if known_name == &pkg.folder_name {
+                    continue;
+                }
+                if let (Some(p1), Some(p2)) = (
+                    extract_scenery_prefix(&pkg.folder_name),
+                    extract_scenery_prefix(known_name),
+                ) {
+                    if p1.eq_ignore_ascii_case(&p2) {
+                        pkg.airport_id = Some(icao.clone());
+                        break;
+                    }
+                }
+                let known_tokens: Vec<&str> = known_name
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|s| s.len() >= 4 && !s.chars().all(|c| c.is_ascii_digit()))
+                    .collect();
+                if known_tokens.iter().any(|tok| lower.contains(&tok.to_lowercase())) {
+                    pkg.airport_id = Some(icao.clone());
+                    break;
+                }
+            }
+        }
+    }
+}
+
 fn compare_packages_for_sorting(
     name_a: &str,
     info_a: &SceneryPackageInfo,
@@ -357,6 +428,25 @@ fn compare_packages_for_sorting(
                         }
                         other => other,
                     }
+                }
+            } else if info_a.category == SceneryCategory::Airport
+                && info_b.category == SceneryCategory::Airport
+                && sub_a == 0
+                && sub_b == 0
+            {
+                let icao_a = extract_airport_icao_key(name_a, info_a);
+                let icao_b = extract_airport_icao_key(name_b, info_b);
+
+                match (&icao_a, &icao_b) {
+                    (Some(a), Some(b)) => match a.cmp(b) {
+                        std::cmp::Ordering::Equal => {
+                            name_a.to_lowercase().cmp(&name_b.to_lowercase())
+                        }
+                        other => other,
+                    },
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => name_a.to_lowercase().cmp(&name_b.to_lowercase()),
                 }
             } else {
                 name_a.to_lowercase().cmp(&name_b.to_lowercase())
@@ -553,6 +643,7 @@ fn sort_packages_with_special_rules(
     xplane_path: &Path,
     packages: &mut Vec<SceneryPackageInfo>,
 ) -> bool {
+    associate_companion_airport_packages(packages);
     let airport_mesh_matches = detect_airport_mesh_matches_with_path(xplane_path, packages);
     let category_changed = apply_airport_mesh_matches(packages, &airport_mesh_matches);
 

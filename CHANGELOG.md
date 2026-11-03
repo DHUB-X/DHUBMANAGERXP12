@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-03
+
+### Added
+
+- **Smart ICAO Scenery Organization** - Automatically displays clean `[ ICAO ]` airport badges and sorts custom scenery alphabetically by ICAO code while preserving companion landmark layers.
+
 ## [1.0.0] - 2026-11-03
 
 ### Initial Release
