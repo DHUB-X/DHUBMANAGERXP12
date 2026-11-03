@@ -120,19 +120,12 @@ jobs:
             suffix: linux-x64
             artifact_glob: 'target/release/bundle/appimage/*.AppImage'
             artifact_suffix: linux-x64.AppImage
-          - platform: macos-latest
-            args: '--target universal-apple-darwin'
-            suffix: macos-universal
-            artifact_glob: 'target/universal-apple-darwin/release/bundle/dmg/*.dmg'
-            artifact_suffix: macos-universal.dmg
-            optional: true
           - platform: windows-latest
             args: ''
             suffix: windows-x64
             artifact_glob: 'target/release/dhub-manager.exe'
             artifact_suffix: windows-portable.exe
 
-    continue-on-error: ${{ matrix.optional == true }}
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -551,10 +544,6 @@ jobs:
           - **Portable:**  [Windows Portable (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-windows-portable.zip)
           - **If your browser blocks `.msi`:**  [Windows Installer ZIP](__BASE_URL__/DHUB-Manager-__VERSION__-windows-setup.zip)
 
-          ### macOS
-
-          - **Apple Silicon + Intel Mac:**  [macOS Universal (.zip)](__BASE_URL__/DHUB-Manager-__VERSION__-macos-universal.zip)
-
           ### Linux
 
           - **Most Linux distributions:**  [AppImage](__BASE_URL__/DHUB-Manager-__VERSION__-linux-x64.AppImage)
@@ -642,7 +631,6 @@ jobs:
           echo "📦 Artifacts included:"
           echo "  - Windows (portable): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-portable.zip"
           echo "  - Windows (installer): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-setup.zip"
-          echo "  - macOS:   DHUB-Manager-${{ needs.prepare-release.outputs.version }}-macos-universal.zip"
           echo "  - Linux (AppImage): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-AppImage.zip"
           echo "  - Linux (Arch): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-arch-x64.tar.gz"
           echo "  - Linux (deb): DHUB-Manager-${{ needs.prepare-release.outputs.version }}-linux-x64-deb.zip"
