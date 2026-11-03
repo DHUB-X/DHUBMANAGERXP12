@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.5] - 2026-11-03
+
+### Fixed
+- Comprehensive multi-language consistency audit across entire application
+- Resolved untranslated strings in Smart Route Scenery Activator, Event Scenery checklist, and Shader Cache purge
+- Translated FlyWithLua quarantine management and real-time performance telemetry controls
+- Restored 100% i18n key coverage and parity between English and Indonesian locales
+
 ## [1.0.4] - 2026-11-03
 
 ### Fixed

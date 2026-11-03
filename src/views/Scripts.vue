@@ -44,7 +44,7 @@ async function handleRestoreQuarantined(script: LuaScriptInfo) {
       xplanePath: appStore.xplanePath,
       fileName: script.fileName,
     })
-    toastStore.success(`Script "${script.fileName}" berhasil dikembalikan dari Quarantine`)
+    toastStore.success(t('scripts.quarantineRestoreSuccess', { fileName: script.fileName }))
     await loadScripts()
   } catch (e) {
     modalStore.showError(String(e))
@@ -60,7 +60,7 @@ async function handleRestoreAllQuarantined() {
     const count = await invoke<number>('restore_all_quarantined_lua_scripts', {
       xplanePath: appStore.xplanePath,
     })
-    toastStore.success(`${count} script berhasil dikembalikan dari Quarantine ke folder Scripts`)
+    toastStore.success(t('scripts.quarantineRestoreAllSuccess', { count }))
     await loadScripts()
   } catch (e) {
     modalStore.showError(String(e))
@@ -289,7 +289,7 @@ onMounted(() => {
                   Scripts (Quarantine) • {{ quarantinedScripts.length }}
                 </div>
                 <div class="text-[11px] text-amber-700 dark:text-amber-300/80">
-                  Script di bawah dipindahkan ke folder Quarantine oleh FlyWithLua karena error saat runtime.
+                  {{ t('scripts.quarantineNotice') }}
                 </div>
               </div>
             </div>
@@ -298,7 +298,7 @@ onMounted(() => {
               class="px-2.5 py-1 rounded-lg text-xs font-medium bg-amber-500 hover:bg-amber-600 text-white disabled:opacity-50 transition-colors flex-shrink-0"
               @click="handleRestoreAllQuarantined"
             >
-              {{ isRestoringAll ? 'Restoring...' : 'Restore All' }}
+              {{ isRestoringAll ? t('scripts.restoringAll') : t('scripts.restoreAll') }}
             </button>
           </div>
 
@@ -311,7 +311,7 @@ onMounted(() => {
               <span
                 class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/40"
               >
-                Quarantined
+                {{ t('scripts.quarantinedBadge') }}
               </span>
               <div class="flex-1 min-w-0">
                 <div
@@ -326,7 +326,7 @@ onMounted(() => {
                 class="px-2 py-1 rounded text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white disabled:opacity-50 transition-colors"
                 @click="handleRestoreQuarantined(qScript)"
               >
-                Restore
+                {{ t('scripts.restore') }}
               </button>
               <button
                 class="flex-shrink-0 p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors"

@@ -261,10 +261,10 @@
         <div>
           <h3 class="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
             <span class="w-2 h-2 rounded-full bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.8)]"></span>
-            <span>Real-Time Framerate Waveform</span>
+            <span>{{ t('stutterDetector.waveformTitle') }}</span>
           </h3>
           <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            Continuous real-time performance telemetry & drop threshold curve
+            {{ t('stutterDetector.waveformDesc') }}
           </p>
         </div>
         <div class="flex items-center gap-3 text-[11px] font-mono">
@@ -363,10 +363,10 @@
             @change="handleThresholdChange"
             class="px-2.5 py-1 text-xs rounded-xl border border-gray-300 dark:border-slate-800 bg-white dark:bg-slate-800/60 text-gray-900 dark:text-white font-mono outline-none focus:border-sky-500/50"
           >
-            <option :value="10">&lt; 10 FPS (Extreme)</option>
-            <option :value="15">&lt; 15 FPS (Default)</option>
-            <option :value="20">&lt; 20 FPS (Sensitive)</option>
-            <option :value="25">&lt; 25 FPS (Very Sensitive)</option>
+            <option :value="10">&lt; 10 FPS ({{ t('stutterDetector.thresholdExtreme') }})</option>
+            <option :value="15">&lt; 15 FPS ({{ t('stutterDetector.thresholdDefault') }})</option>
+            <option :value="20">&lt; 20 FPS ({{ t('stutterDetector.thresholdSensitive') }})</option>
+            <option :value="25">&lt; 25 FPS ({{ t('stutterDetector.thresholdVerySensitive') }})</option>
           </select>
         </div>
       </div>
@@ -397,28 +397,28 @@
               class="w-full text-left px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-slate-700/60 text-gray-800 dark:text-slate-200 flex items-center gap-2"
             >
               <span class="w-2.5 h-2.5 rounded-sm bg-purple-500 flex-shrink-0"></span>
-              <span>VRAM Overload (8.4 FPS)</span>
+              <span>{{ t('stutterDetector.simVram') }}</span>
             </button>
             <button
               @click="triggerSimulate('cpu')"
               class="w-full text-left px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-slate-700/60 text-gray-800 dark:text-slate-200 flex items-center gap-2"
             >
               <span class="w-2.5 h-2.5 rounded-sm bg-blue-500 flex-shrink-0"></span>
-              <span>CPU Bottleneck (10.8 FPS)</span>
+              <span>{{ t('stutterDetector.simCpu') }}</span>
             </button>
             <button
               @click="triggerSimulate('gpu')"
               class="w-full text-left px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-slate-700/60 text-gray-800 dark:text-slate-200 flex items-center gap-2"
             >
               <span class="w-2.5 h-2.5 rounded-sm bg-red-500 flex-shrink-0"></span>
-              <span>GPU Overload (11.2 FPS)</span>
+              <span>{{ t('stutterDetector.simGpu') }}</span>
             </button>
             <button
               @click="triggerSimulate('scenery')"
               class="w-full text-left px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-slate-700/60 text-gray-800 dark:text-slate-200 flex items-center gap-2"
             >
               <span class="w-2.5 h-2.5 rounded-sm bg-amber-500 flex-shrink-0"></span>
-              <span>Scenery Tile Loading (9.5 FPS)</span>
+              <span>{{ t('stutterDetector.simScenery') }}</span>
             </button>
           </div>
         </div>

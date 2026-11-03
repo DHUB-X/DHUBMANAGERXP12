@@ -452,6 +452,7 @@ export default {
     "autoUpdateCheckBenefit3": "Menampilkan banner pemberitahuan di beranda saat versi baru ditemukan",
     "includePreRelease": "Sertakan Prarilis",
     "includePreReleaseDesc": "Sertakan versi Beta/RC dan prarilis lainnya saat memeriksa pembaruan",
+    "changelog": "Log Perubahan",
     "viewCurrentChangelog": "Lihat Log Perubahan Versi Ini",
     "changelogNotFound": "Tidak ada catatan log perubahan untuk v{version}",
     "postUpdateTitle": "Apa yang Baru di v{version}",
@@ -610,7 +611,44 @@ export default {
     "indexChangesAdded": "Ditambahkan",
     "indexChangesRemoved": "Dihapus",
     "indexChangesUpdated": "Diperbarui",
-    "indexChangesSyncToIni": "Sinkronkan ke file ini"
+    "indexChangesSyncToIni": "Sinkronkan ke file ini",
+    "smartRoute": {
+      "title": "Smart Route Scenery Activator",
+      "subtitle": "Aktifkan scenery sesuai rute terbang (SimBrief / ICAO) agar loading cepat & hemat VRAM",
+      "importSimBrief": "Impor Rute Otomatis dari SimBrief",
+      "pilotIdPlaceholder": "SimBrief Pilot ID / Username",
+      "fetchSimBrief": "Ambil SimBrief",
+      "fetching": "Mengambil...",
+      "departureIcao": "ICAO Keberangkatan",
+      "arrivalIcao": "ICAO Kedatangan",
+      "alternateExtra": "Alternatif / Ekstra",
+      "includeCompanionsTitle": "Sertakan City Landmarks & Paket Pendamping Bandara",
+      "includeCompanionsDesc": "Otomatis ikut mengaktifkan folder kota/landmark/overlay pasangan bandara (mis. 2_KDCA_City, 2-iniBuilds-Doha-City-Landmarks, RJTT_Overlays).",
+      "modeTitle": "Mode Aktivasi Scenery",
+      "modeRouteContinentTitle": "Rute + Benua Aktif (Recommended)",
+      "modeRouteContinentDesc": "Aktifkan bandara rute beserta seluruh scenery di benua yang dilewati; matikan bandara & mesh di benua lain. Library, Global Airports, Landmarks & AEP tetap aktif.",
+      "modeStrictRouteTitle": "Strict Route Only (Max FPS & Fast Loading)",
+      "modeStrictRouteDesc": "Hanya aktifkan Custom Airport yang cocok dengan ICAO Departure/Arrival/Alternate (+ Library, Global Airports & AEP). Custom Airport lain dinonaktifkan sementara.",
+      "enableAll": "Aktifkan Semua Scenery",
+      "applyRoute": "Terapkan Rute",
+      "enterPilotIdWarning": "Masukkan SimBrief Pilot ID atau Username terlebih dahulu",
+      "minIcaoWarning": "Masukkan minimal 1 kode ICAO (mis. WIII / WADD)",
+      "simbriefFetchFailed": "Gagal mengambil data SimBrief: {error}",
+      "routeAppliedToast": "Smart Route diterapkan ({route}): {enabled} diaktifkan, {disabled} dinonaktifkan. Klik Terapkan untuk menyimpan ke scenery_packs.ini.",
+      "allEnabledToast": "{count} scenery diaktifkan kembali. Klik Terapkan untuk menyimpan.",
+      "buttonTooltip": "Smart Route Scenery Activator (SimBrief / ICAO)"
+    },
+    "libraryInstall": {
+      "installedSuccess": "Library berhasil di-install ke Custom Scenery: {folders}",
+      "browserDownloadRequired": "Link memerlukan download via browser (mis. login forum). Silakan unduh lalu klik \"Install File (.zip/.7z)\" di bawah.",
+      "autoInstallFailed": "Auto-install gagal: {error}",
+      "archiveInstalledSuccess": "Library berhasil diekstrak & di-install: {folders}",
+      "archiveInstallFailed": "Gagal meng-install arsip library: {error}",
+      "autoInstallTooltip": "Download & Auto-Install langsung ke Custom Scenery",
+      "installArchiveTooltip": "Pilih file .zip atau .7z library yang sudah diunduh untuk di-install otomatis ke Custom Scenery",
+      "installArchiveButton": "Install File (.zip/.7z)",
+      "installingArchive": "Meng-install Arsip..."
+    },
   },
   "geo": {
     "continents": {
@@ -977,6 +1015,14 @@ export default {
       "customOnly": "Hanya Scenery Kustom",
       "minRunways": "Minimal Landasan Pacu"
     },
+    "eventScenery": {
+      "checkTooltip": "Periksa kesiapan scenery bandara untuk event ini",
+      "checkButton": "Periksa Scenery",
+      "statusTitle": "Status Bandara Event:",
+      "noAirportsFound": "Tidak ditemukan rute bandara spesifik di detail event ini.",
+      "activateButton": "Aktifkan Scenery Event",
+      "activatedSuccess": "{count} scenery bandara event berhasil diaktifkan!"
+    },
     "stats": {
       "airports": "Bandara",
       "navaids": "Navaid",
@@ -1014,7 +1060,14 @@ export default {
     "deleteConfirmTitle": "Konfirmasi Penghapusan",
     "deleteConfirmMessage": "Apakah Anda yakin ingin menghapus skrip ini?",
     "deleteSuccess": "Skrip berhasil dihapus",
-    "deleteFailed": "Gagal menghapus skrip"
+    "deleteFailed": "Gagal menghapus skrip",
+    "quarantineRestoreSuccess": "Script \"{fileName}\" berhasil dikembalikan dari Quarantine",
+    "quarantineRestoreAllSuccess": "{count} script berhasil dikembalikan dari Quarantine ke folder Scripts",
+    "quarantineNotice": "Script di bawah dipindahkan ke folder Quarantine oleh FlyWithLua karena error saat runtime.",
+    "restoreAll": "Pulihkan Semua",
+    "restoringAll": "Memulihkan...",
+    "quarantinedBadge": "Dikarantina",
+    "restore": "Pulihkan",
   },
   "sponsor": {
     "title": "Dukungan",
@@ -1544,6 +1597,14 @@ export default {
     "empty": "Tidak ada data pemindaian yang tersedia",
     "emptyHint": "Klik Pindai untuk menganalisis penggunaan ruang disk",
     "outputCleanup": {
+      "shaderPurge": {
+        "button": "Bersihkan Shader Cache",
+        "tooltip": "Bersihkan shader & Vulkan cache untuk mengatasi stuttering dan crash setelah update driver GPU atau mod scenery",
+        "title": "Bersihkan Shader & Vulkan Cache",
+        "message": "Shader cache dan pipeline cache yang corrupt sering menyebabkan stuttering atau crash (CTD) setelah update driver GPU atau mod scenery. X-Plane akan otomatis mengompilasi ulang shader saat start berikutnya. Lanjutkan pembersihan?",
+        "confirm": "Bersihkan Cache",
+        "successToast": "Shader cache berhasil dibersihkan ({count} files, {size}). Stuttering & pipeline shader telah di-reset!"
+      },
       "title": "Pembersihan Output",
       "subtitle": "Bersihkan cache dan file sementara di folder Output X-Plane. Folder tingkat atas tetap dipertahankan.",
       "loading": "Memuat item pembersihan...",
@@ -1950,6 +2011,16 @@ export default {
     cpuHeavier: 'CPU-bound: Prosesor lebih berat daripada kartu grafis',
     gpuHeavier: 'GPU-bound: Kartu grafis lebih berat daripada prosesor',
     balanced: 'Beban waktu CPU dan GPU seimbang',
+    "waveformTitle": "Gelombang Framerate Real-Time",
+    "waveformDesc": "Telemetri performa real-time & kurva batas penurunan FPS",
+    "thresholdExtreme": "Ekstrem",
+    "thresholdDefault": "Bawaan",
+    "thresholdSensitive": "Sensitif",
+    "thresholdVerySensitive": "Sangat Sensitif",
+    "simVram": "VRAM Overload (8.4 FPS)",
+    "simCpu": "CPU Bottleneck (10.8 FPS)",
+    "simGpu": "GPU Overload (11.2 FPS)",
+    "simScenery": "Pemuatan Tile Scenery (9.5 FPS)",
     causes: {
       vram_overload: {
         title: 'VRAM GPU Penuh (Tekstur Meluap ke RAM)',

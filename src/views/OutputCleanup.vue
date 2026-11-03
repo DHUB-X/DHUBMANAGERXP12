@@ -30,13 +30,13 @@
         <!-- 1-Click Purge Shader & Vulkan Cache (Anti-Stutter & Crash Fixer) -->
         <button
           class="text-xs px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-medium transition-colors flex items-center gap-1.5 shadow-sm"
-          title="Bersihkan shader & Vulkan cache untuk mengatasi stuttering dan crash setelah update driver GPU atau mod scenery"
+          :title="$t('diskUsage.outputCleanup.shaderPurge.tooltip')"
           @click="handlePurgeShaderCache"
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
-          <span>Purge Shader Cache</span>
+          <span>{{ $t('diskUsage.outputCleanup.shaderPurge.button') }}</span>
         </button>
         <button
           class="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-white/10 transition-colors disabled:opacity-50"
@@ -320,10 +320,9 @@ const issueTracker = useIssueTrackerStore()
 async function handlePurgeShaderCache() {
   if (!appStore.xplanePath) return
   modal.showConfirm({
-    title: 'Purge Shader & Vulkan Cache',
-    message:
-      'Shader cache dan pipeline cache yang corrupt sering menyebabkan stuttering atau crash (CTD) setelah update driver GPU atau mod scenery. X-Plane akan otomatis mengompilasi ulang shader saat start berikutnya. Lanjutkan pembersihan?',
-    confirmText: 'Purge Cache',
+    title: t('diskUsage.outputCleanup.shaderPurge.title'),
+    message: t('diskUsage.outputCleanup.shaderPurge.message'),
+    confirmText: t('diskUsage.outputCleanup.shaderPurge.confirm'),
     cancelText: t('common.cancel'),
     type: 'warning',
     onConfirm: async () => {
@@ -332,9 +331,7 @@ async function handlePurgeShaderCache() {
           'purge_shader_cache',
           { xplanePath: appStore.xplanePath },
         )
-        toast.success(
-          `Shader cache berhasil dibersihkan (${result.totalDeletedFiles} files, ${formatSize(result.totalDeletedBytes)}). Stuttering & pipeline shader telah di-reset!`,
-        )
+        toast.success(t('diskUsage.outputCleanup.shaderPurge.successToast', { count: result.totalDeletedFiles, size: formatSize(result.totalDeletedBytes) }))
         await refreshCleanup()
       } catch (e) {
         modal.showError(String(e))

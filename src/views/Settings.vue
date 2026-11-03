@@ -2156,10 +2156,10 @@
             <!-- Changelog Button -->
             <button
               class="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 dark:border-white/10 hover:bg-gray-100 dark:hover:bg-gray-700/50 text-gray-700 dark:text-gray-300 transition-colors"
-              title="Changelog"
+              :title="$t('update.viewCurrentChangelog')"
               @click.stop="handleViewCurrentVersionChangelog"
             >
-              Changelog
+              {{ $t('update.changelog') }}
             </button>
 
             <svg
@@ -2206,10 +2206,10 @@
               <div class="flex items-center justify-between">
                 <div>
                   <p class="text-sm font-medium text-gray-800 dark:text-gray-200">
-                    Pre-Release & Beta Updates
+                    {{ $t('update.includePreRelease') }}
                   </p>
                   <p class="text-xs text-gray-500 dark:text-gray-400">
-                    Sertakan versi pra-rilis atau pengujian
+                    {{ $t('update.includePreReleaseDesc') }}
                   </p>
                 </div>
                 <ToggleSwitch

@@ -621,10 +621,10 @@
                 </div>
                 <button
                   class="flex-shrink-0 px-1.5 py-0.5 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-400/30 text-[10px] font-medium transition-colors"
-                  title="Periksa kesiapan scenery bandara untuk event ini"
+                  :title="t('map.eventScenery.checkTooltip')"
                   @click="openEventSceneryCheck(event)"
                 >
-                  Check Scenery
+                  {{ t('map.eventScenery.checkButton') }}
                 </button>
               </div>
             </div>
@@ -829,13 +829,13 @@
           <!-- Airport Checklist -->
           <div class="space-y-2">
             <div class="text-xs font-medium text-gray-700 dark:text-gray-300">
-              Status Bandara Event:
+              {{ t('map.eventScenery.statusTitle') }}
             </div>
             <div
               v-if="checkedEventAirports.length === 0"
               class="p-3 text-center text-xs text-gray-500 rounded-lg bg-gray-50 dark:bg-gray-900/50"
             >
-              Tidak ditemukan rute bandara spesifik di detail event ini.
+              {{ t('map.eventScenery.noAirportsFound') }}
             </div>
             <div v-else class="space-y-1.5 max-h-60 overflow-y-auto">
               <div
@@ -894,14 +894,14 @@
               class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-medium transition-colors"
               @click="handleActivateEventSceneries"
             >
-              Aktifkan Scenery Event
+              {{ t('map.eventScenery.activateButton') }}
             </button>
             <div v-else></div>
             <button
               class="px-3.5 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 text-xs font-medium transition-colors"
               @click="showEventSceneryModal = false"
             >
-              Tutup
+              {{ t('common.close') }}
             </button>
           </div>
         </div>
@@ -1063,7 +1063,7 @@ async function handleActivateEventSceneries() {
         enabledCount++
       }
     }
-    toast.success(`${enabledCount} scenery bandara event berhasil diaktifkan!`)
+    toast.success(t('map.eventScenery.activatedSuccess', { count: enabledCount }))
   } catch (e) {
     modalStore.showError(String(e))
   } finally {
