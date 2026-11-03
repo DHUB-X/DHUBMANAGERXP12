@@ -2118,6 +2118,24 @@
           </div>
 
           <div class="flex items-center gap-2.5">
+            <!-- Update Now Button (visible when new version is available) -->
+            <button
+              v-if="updateStore.showUpdateBanner && updateStore.updateInfo?.isUpdateAvailable"
+              class="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs shadow-emerald-500/20 active:scale-95 transition-all flex items-center gap-1.5 animate-pulse"
+              :disabled="updateStore.isDownloading"
+              :title="$t('update.updateNow')"
+              @click.stop="updateStore.performUpdate"
+            >
+              <div
+                v-if="updateStore.isDownloading"
+                class="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"
+              ></div>
+              <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              <span>{{ updateStore.isDownloading ? `${updateStore.downloadProgress}%` : `${$t('update.updateNow')} (v${updateStore.updateInfo.latestVersion})` }}</span>
+            </button>
+
             <!-- Manual Check for Updates Button -->
             <button
               class="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-xs shadow-blue-500/20 active:scale-95 transition-all flex items-center gap-1.5 disabled:opacity-50"
