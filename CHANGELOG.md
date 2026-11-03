@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.3] - 2026-11-03
+
+### Fixed
+- Fixed duplicate desktop shortcuts occurring on Windows after application updates
+- Excluded companion city and library packages from receiving airport ICAO badges
+
+### Changed
+- Standardized ICAO badge container spacing to ensure all airport file names align perfectly in parallel
+
 ## [1.0.2] - 2026-11-03
 
 ### Fixed

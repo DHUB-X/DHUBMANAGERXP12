@@ -4545,6 +4545,23 @@ pub fn run() {
             let detector = stutter_detector::get_or_init_detector();
             let _ = detector.start(None, None, None);
 
+            // Clean up any stale duplicate desktop shortcuts on Windows
+            #[cfg(target_os = "windows")]
+            {
+                if let (Some(user_desktop), Some(public_desktop)) = (
+                    dirs::desktop_dir(),
+                    std::env::var_os("PUBLIC").map(|p| std::path::PathBuf::from(p).join("Desktop")),
+                ) {
+                    for app_name in &["DHUB Manager XP12.lnk", "DHUB Manager XP11.lnk", "DHUB Manager.lnk"] {
+                        let user_shortcut = user_desktop.join(app_name);
+                        let public_shortcut = public_desktop.join(app_name);
+                        if user_shortcut.exists() && public_shortcut.exists() {
+                            let _ = std::fs::remove_file(&user_shortcut);
+                        }
+                    }
+                }
+            }
+
             // Setup System Tray Icon & Menu (HWiNFO / Background Monitoring style)
             let open_item = MenuItem::with_id(app, "open", "Open DHUB Manager", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Exit DHUB Manager", true, None::<&str>)?;

@@ -189,21 +189,41 @@ const isSpecialAirport = computed(() => {
   )
 })
 
+const isNonAirportLayer = (folderName: string) => {
+  const lower = folderName.toLowerCase()
+  return (
+    lower.includes('_city') ||
+    lower.includes('-city') ||
+    lower.endsWith(' city') ||
+    lower.includes('landmark') ||
+    lower.includes('overlay') ||
+    lower.includes('phototerrain') ||
+    lower.includes('mesh') ||
+    lower.includes('roads') ||
+    lower.endsWith('_lib') ||
+    lower.endsWith('-lib') ||
+    lower.includes('library')
+  )
+}
+
 const displayIcao = computed(() => {
   if (isSpecialAirport.value) return null
   if (props.entry.category !== 'Airport') return null
+  if (isNonAirportLayer(props.entry.folderName)) return null
 
-  if (props.entry.airportId) {
-    const trimmed = props.entry.airportId.trim().toUpperCase()
-    if (trimmed.length >= 3 && trimmed.length <= 5 && !NOISE_WORDS.has(trimmed)) {
-      return trimmed
-    }
-  }
-
+  // Priority 1: 4-letter alphabetic ICAO directly from folder name
   const tokens = props.entry.folderName.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
   for (const token of tokens) {
     if (token.length === 4 && /^[A-Z]{4}$/.test(token) && !NOISE_WORDS.has(token)) {
       return token
+    }
+  }
+
+  // Priority 2: airportId from apt.dat (must be 4 alphabetic letters, no heliport codes like DC04 or EX16)
+  if (props.entry.airportId) {
+    const trimmed = props.entry.airportId.trim().toUpperCase()
+    if (trimmed.length === 4 && /^[A-Z]{4}$/.test(trimmed) && !NOISE_WORDS.has(trimmed)) {
+      return trimmed
     }
   }
 
@@ -552,14 +572,14 @@ function handleContextMenu(event: MouseEvent) {
 
     <!-- Folder name with optional [ ICAO ] -->
     <div
-      class="flex-1 min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
+      class="flex-1 min-w-0 flex items-center text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
       :title="displayIcao ? `[ ${displayIcao} ] ${entry.folderName}` : entry.folderName"
     >
       <span
         v-if="displayIcao"
-        class="text-sm font-semibold text-sky-600 dark:text-sky-400 mr-2 select-all"
+        class="inline-block w-[78px] font-semibold text-sky-600 dark:text-sky-400 shrink-0 text-left select-all"
       >[ {{ displayIcao }} ]</span>
-      <span>{{ entry.folderName }}</span>
+      <span class="truncate">{{ entry.folderName }}</span>
     </div>
 
     <!-- Missing dependencies warning (before category badge) -->

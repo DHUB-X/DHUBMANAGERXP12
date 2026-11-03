@@ -309,8 +309,23 @@ fn is_special_scenery_package(folder_name: &str) -> bool {
         || trimmed == "*global_airports*"
 }
 
+fn is_non_airport_layer(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("_city")
+        || lower.contains("-city")
+        || lower.ends_with(" city")
+        || lower.contains("landmark")
+        || lower.contains("overlay")
+        || lower.contains("phototerrain")
+        || lower.contains("mesh")
+        || lower.contains("roads")
+        || lower.ends_with("_lib")
+        || lower.ends_with("-lib")
+        || lower.contains("library")
+}
+
 fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<String> {
-    if is_special_scenery_package(name) {
+    if is_special_scenery_package(name) || is_non_airport_layer(name) {
         return None;
     }
 
@@ -320,25 +335,28 @@ fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<Str
         "AIRP", "PARK", "HIGH", "WIDE", "DEPO", "APRO", "TERM",
     ];
 
-    if let Some(ref id) = info.airport_id {
-        let trimmed = id.trim().to_uppercase();
-        if trimmed.len() >= 3 && trimmed.len() <= 5 && !NOISE_WORDS.contains(&trimmed.as_str()) {
-            return Some(trimmed);
-        }
-    }
-
     let upper = name.to_uppercase();
     let tokens: Vec<&str> = upper
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
         .collect();
 
-    for token in tokens {
+    for token in &tokens {
         if token.len() == 4
             && token.chars().all(|c| c.is_ascii_alphabetic())
-            && !NOISE_WORDS.contains(&token)
+            && !NOISE_WORDS.contains(token)
         {
             return Some(token.to_string());
+        }
+    }
+
+    if let Some(ref id) = info.airport_id {
+        let trimmed = id.trim().to_uppercase();
+        if trimmed.len() == 4
+            && trimmed.chars().all(|c| c.is_ascii_alphabetic())
+            && !NOISE_WORDS.contains(&trimmed.as_str())
+        {
+            return Some(trimmed);
         }
     }
 
