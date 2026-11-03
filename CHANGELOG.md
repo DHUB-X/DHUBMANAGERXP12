@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.4] - 2026-11-03
+
+### Fixed
+- Fixed airport ICAO extraction prioritizing folder name words (such as HANG or BOLD) over authentic apt.dat airport IDs
+- Promoted global UpdateBanner to top-level app layout, notifying users of updates across all pages
+
 ## [1.0.3] - 2026-11-03
 
 ### Fixed

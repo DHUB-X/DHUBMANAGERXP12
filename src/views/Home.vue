@@ -9,20 +9,6 @@
     ></div>
 
     <div class="w-full z-10 flex flex-col flex-1 min-h-0 gap-2.5 sm:gap-3">
-      <!-- Update Banner -->
-      <UpdateBanner
-        :visible="updateStore.showUpdateBanner"
-        :update-info="updateStore.updateInfo"
-        :is-downloading="updateStore.isDownloading"
-        :download-progress="updateStore.downloadProgress"
-        :update-phase="updateStore.updatePhase"
-        :update-error="updateStore.updateError"
-        @view-release="updateStore.openReleaseUrl"
-        @dismiss="updateStore.dismissUpdate"
-        @update="updateStore.performUpdate"
-        @retry="updateStore.performUpdate"
-      />
-
       <!-- Warning Alert (Compact) -->
       <transition name="slide-down">
         <div
@@ -553,7 +539,6 @@ import { open } from '@tauri-apps/plugin-dialog'
 import ConfirmationModal from '@/components/ConfirmationModal.vue'
 import PasswordModal from '@/components/PasswordModal.vue'
 import AnimatedText from '@/components/AnimatedText.vue'
-import UpdateBanner from '@/components/UpdateBanner.vue'
 import InstallProgressOverlay from '@/components/InstallProgressOverlay.vue'
 import AnalyzingOverlay from '@/components/AnalyzingOverlay.vue'
 import type { AnalysisResult, InstallProgress, InstallResult } from '@/types'

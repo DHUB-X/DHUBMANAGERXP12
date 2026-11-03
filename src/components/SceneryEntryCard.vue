@@ -171,7 +171,8 @@ const assignedCustomGroup = computed(() =>
 const NOISE_WORDS = new Set([
   'XP11', 'XP12', 'MESH', 'INTL', 'CITY', 'ROAD', 'ROADS', 'SFD', 'AERO', 'TAIM',
   'PACK', 'APTS', 'DEMO', 'SCEN', 'PART', 'FLAT', 'FREE', 'BASE', 'FULL',
-  'AIRP', 'PARK', 'HIGH', 'WIDE', 'DEPO', 'APRO', 'TERM'
+  'AIRP', 'PARK', 'HIGH', 'WIDE', 'DEPO', 'APRO', 'TERM', 'BOLD', 'HANG',
+  'REAL', 'EAST', 'WEST', 'NICE', 'PORT', 'LAKE', 'HILL', 'ISLE', 'LAND',
 ])
 
 const isSpecialAirport = computed(() => {
@@ -211,19 +212,19 @@ const displayIcao = computed(() => {
   if (props.entry.category !== 'Airport') return null
   if (isNonAirportLayer(props.entry.folderName)) return null
 
-  // Priority 1: 4-letter alphabetic ICAO directly from folder name
-  const tokens = props.entry.folderName.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
-  for (const token of tokens) {
-    if (token.length === 4 && /^[A-Z]{4}$/.test(token) && !NOISE_WORDS.has(token)) {
-      return token
-    }
-  }
-
-  // Priority 2: airportId from apt.dat (must be 4 alphabetic letters, no heliport codes like DC04 or EX16)
+  // Priority 1: Official airportId from apt.dat (strictly 4 alphabetic letters, e.g. WIDD, WIBB, WADD)
   if (props.entry.airportId) {
     const trimmed = props.entry.airportId.trim().toUpperCase()
     if (trimmed.length === 4 && /^[A-Z]{4}$/.test(trimmed) && !NOISE_WORDS.has(trimmed)) {
       return trimmed
+    }
+  }
+
+  // Priority 2: Fallback to 4-letter alphabetic token from folder name only if no apt.dat airportId
+  const tokens = props.entry.folderName.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
+  for (const token of tokens) {
+    if (token.length === 4 && /^[A-Z]{4}$/.test(token) && !NOISE_WORDS.has(token)) {
+      return token
     }
   }
 

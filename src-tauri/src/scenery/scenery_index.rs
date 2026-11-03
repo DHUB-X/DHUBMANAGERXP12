@@ -332,9 +332,22 @@ fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<Str
     const NOISE_WORDS: &[&str] = &[
         "XP11", "XP12", "MESH", "INTL", "CITY", "ROAD", "ROADS", "SFD", "AERO", "TAIM",
         "PACK", "APTS", "DEMO", "SCEN", "PART", "FLAT", "FREE", "BASE", "FULL",
-        "AIRP", "PARK", "HIGH", "WIDE", "DEPO", "APRO", "TERM",
+        "AIRP", "PARK", "HIGH", "WIDE", "DEPO", "APRO", "TERM", "BOLD", "HANG",
+        "REAL", "EAST", "WEST", "NICE", "PORT", "LAKE", "HILL", "ISLE", "LAND",
     ];
 
+    // Priority 1: Official airport_id from apt.dat (strictly 4 alphabetic letters)
+    if let Some(ref id) = info.airport_id {
+        let trimmed = id.trim().to_uppercase();
+        if trimmed.len() == 4
+            && trimmed.chars().all(|c| c.is_ascii_alphabetic())
+            && !NOISE_WORDS.contains(&trimmed.as_str())
+        {
+            return Some(trimmed);
+        }
+    }
+
+    // Priority 2: Fallback to folder name tokens only if no apt.dat airport_id
     let upper = name.to_uppercase();
     let tokens: Vec<&str> = upper
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -347,16 +360,6 @@ fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<Str
             && !NOISE_WORDS.contains(token)
         {
             return Some(token.to_string());
-        }
-    }
-
-    if let Some(ref id) = info.airport_id {
-        let trimmed = id.trim().to_uppercase();
-        if trimmed.len() == 4
-            && trimmed.chars().all(|c| c.is_ascii_alphabetic())
-            && !NOISE_WORDS.contains(&trimmed.as_str())
-        {
-            return Some(trimmed);
         }
     }
 

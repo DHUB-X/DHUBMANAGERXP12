@@ -388,11 +388,32 @@
         'flex-1',
         'min-h-0',
         'overflow-hidden',
+        'flex',
+        'flex-col',
         { 'hide-scrollbar': $route.path === '/' },
       ]"
       :style="{ paddingTop: mainContentPaddingTop }"
     >
-      <div class="h-full overflow-y-auto">
+      <!-- Global Update Banner (appears at the top of every page) -->
+      <div
+        v-if="updateStore.showUpdateBanner"
+        class="w-full px-4 sm:px-6 pt-2 pb-1 shrink-0 z-40"
+      >
+        <UpdateBanner
+          :visible="updateStore.showUpdateBanner"
+          :update-info="updateStore.updateInfo"
+          :is-downloading="updateStore.isDownloading"
+          :download-progress="updateStore.downloadProgress"
+          :update-phase="updateStore.updatePhase"
+          :update-error="updateStore.updateError"
+          @view-release="updateStore.openReleaseUrl"
+          @dismiss="updateStore.dismissUpdate"
+          @update="updateStore.performUpdate"
+          @retry="updateStore.performUpdate"
+        />
+      </div>
+
+      <div class="h-full overflow-y-auto flex-1 min-h-0">
         <router-view v-slot="{ Component }">
           <transition :name="transitionName" mode="out-in">
             <component :is="Component" />
@@ -450,6 +471,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { syncLocaleToBackend } from '@/i18n'
 import { logBasic, logDebug, logError } from '@/services/logger'
+import UpdateBanner from '@/components/UpdateBanner.vue'
 import ToastNotification from '@/components/ToastNotification.vue'
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import ThemeSwitcher from '@/components/ThemeSwitcher.vue'
