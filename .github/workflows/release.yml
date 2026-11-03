@@ -125,12 +125,14 @@ jobs:
             suffix: macos-universal
             artifact_glob: 'target/universal-apple-darwin/release/bundle/dmg/*.dmg'
             artifact_suffix: macos-universal.dmg
+            optional: true
           - platform: windows-latest
             args: ''
             suffix: windows-x64
             artifact_glob: 'target/release/dhub-manager.exe'
             artifact_suffix: windows-portable.exe
 
+    continue-on-error: ${{ matrix.optional == true }}
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -599,6 +601,7 @@ jobs:
           body_path: release-files/release-notes.md
           draft: false
           prerelease: ${{ needs.prepare-release.outputs.is_prerelease == 'true' }}
+          fail_on_unmatched_files: false
           files: |
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-portable.zip
             release-files/DHUB-Manager-${{ needs.prepare-release.outputs.version }}-windows-setup.zip
