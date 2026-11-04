@@ -295,7 +295,7 @@ fn resolve_package_dir(custom_scenery_path: &Path, info: &SceneryPackageInfo) ->
     custom_scenery_path.join(&info.folder_name)
 }
 
-fn is_special_scenery_package(folder_name: &str) -> bool {
+pub(crate) fn is_special_scenery_package(folder_name: &str) -> bool {
     let lower = folder_name.to_lowercase();
     let trimmed = lower.trim();
     trimmed.starts_with("x-plane airports")
@@ -309,7 +309,7 @@ fn is_special_scenery_package(folder_name: &str) -> bool {
         || trimmed == "*global_airports*"
 }
 
-fn is_non_airport_layer(name: &str) -> bool {
+pub(crate) fn is_non_airport_layer(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.contains("_city")
         || lower.contains("-city")
@@ -2514,14 +2514,21 @@ fn detect_duplicate_airports(
     // Build map: airport_id -> Vec<folder_name> (only for enabled packages)
     let mut id_map: HashMap<String, Vec<String>> = HashMap::new();
     for (folder_name, info) in packages {
-        if !info.enabled || is_special_scenery_package(folder_name) {
+        if !info.enabled
+            || info.category != SceneryCategory::Airport
+            || is_special_scenery_package(folder_name)
+            || is_non_airport_layer(folder_name)
+        {
             continue;
         }
         if let Some(ref airport_id) = info.airport_id {
-            id_map
-                .entry(airport_id.clone())
-                .or_default()
-                .push(folder_name.clone());
+            let trimmed = airport_id.trim().to_uppercase();
+            if trimmed.len() == 4 && trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+                id_map
+                    .entry(trimmed)
+                    .or_default()
+                    .push(folder_name.clone());
+            }
         }
     }
 

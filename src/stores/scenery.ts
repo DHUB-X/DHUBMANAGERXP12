@@ -531,6 +531,31 @@ export const useSceneryStore = defineStore('scenery', () => {
   // through computed properties (groupedEntries) into the template.
   let recalcTimer: ReturnType<typeof setTimeout> | null = null
 
+  function isEligibleForDuplicateAirport(entry: SceneryManagerEntry): boolean {
+    if (!entry.enabled || !entry.airportId) return false
+    if (entry.category !== 'Airport') return false
+    const lower = entry.folderName.toLowerCase().trim()
+    if (
+      lower.startsWith('x-plane landmarks') ||
+      lower.startsWith('xplane landmarks') ||
+      lower.startsWith('x-plane airports') ||
+      lower.startsWith('xplane airports') ||
+      lower.startsWith('aep') ||
+      lower === '*global_airports*' ||
+      lower === 'global airports' ||
+      lower.includes('landmark') ||
+      lower.includes('overlay') ||
+      lower.includes('mesh') ||
+      lower.endsWith('_lib') ||
+      lower.endsWith('-lib') ||
+      lower.includes('library')
+    ) {
+      return false
+    }
+    const id = entry.airportId.trim().toUpperCase()
+    return id.length === 4 && /^[A-Z]{4}$/.test(id)
+  }
+
   function recalcDuplicateTiles() {
     if (!data.value) return
     const overlaps = data.value.tileOverlaps ?? {}
@@ -540,10 +565,11 @@ export const useSceneryStore = defineStore('scenery', () => {
     // Build airportId -> enabled folderNames map for live duplicateAirports recalculation
     const airportIdMap = new Map<string, string[]>()
     for (const entry of data.value.entries) {
-      if (entry.enabled && entry.airportId) {
-        const list = airportIdMap.get(entry.airportId) ?? []
+      if (isEligibleForDuplicateAirport(entry)) {
+        const id = entry.airportId!.trim().toUpperCase()
+        const list = airportIdMap.get(id) ?? []
         list.push(entry.folderName)
-        airportIdMap.set(entry.airportId, list)
+        airportIdMap.set(id, list)
       }
     }
 
@@ -571,8 +597,9 @@ export const useSceneryStore = defineStore('scenery', () => {
       }
 
       let newAirports: string[] = []
-      if (entry.enabled && entry.airportId) {
-        const sameIdFolders = airportIdMap.get(entry.airportId) ?? []
+      if (isEligibleForDuplicateAirport(entry)) {
+        const id = entry.airportId!.trim().toUpperCase()
+        const sameIdFolders = airportIdMap.get(id) ?? []
         if (sameIdFolders.length > 1) {
           newAirports = sameIdFolders.filter((f) => f !== entry.folderName).sort()
         }

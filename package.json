@@ -1,6 +1,6 @@
 {
   "name": "dhub-manager-xp12",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "DHUB Manager XP12 - X-Plane 12 Addon Auto Manager",
   "type": "module",
   "scripts": {

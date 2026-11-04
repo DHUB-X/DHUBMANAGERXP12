@@ -325,8 +325,17 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
     // Decision Tree:
     // 1. Has apt.dat OR (DSF with WorldEditor creation_agent) → Airport
     if has_apt_dat {
+        let is_lib = has_library_txt
+            || folder_name.to_lowercase().contains("_lib")
+            || folder_name.to_lowercase().contains("library");
+        let is_layer = crate::scenery_index::is_non_airport_layer(&folder_name);
+
         let category = if is_global_airports_folder_name(&folder_name) {
             SceneryCategory::DefaultAirport
+        } else if is_lib {
+            classify_library_folder_name(&folder_name)
+        } else if is_layer {
+            SceneryCategory::Overlay
         } else {
             SceneryCategory::Airport
         };
@@ -366,6 +375,12 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
             );
         }
 
+        let airport_id = if category == SceneryCategory::Airport {
+            parse_airport_id(scenery_path)
+        } else {
+            None
+        };
+
         return build_package_info(
             folder_name,
             category,
@@ -379,7 +394,7 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
                 required_libraries,
                 missing_libraries: Vec::new(), // missing_libraries will be filled later
                 exported_library_names,
-                airport_id: parse_airport_id(scenery_path),
+                airport_id,
             },
         );
     }
@@ -746,13 +761,19 @@ fn parse_airport_id(scenery_path: &Path) -> Option<String> {
             continue;
         }
         match fields[0] {
-            "1" | "16" | "17" => {
-                // Airport header line: fields[4] is the airport identifier
+            "1" => {
+                // Land Airport header line: fields[4] is the airport identifier
                 if fields.len() >= 5 {
-                    return Some(fields[4].to_string());
+                    let id = fields[4].trim().to_uppercase();
+                    if id.len() == 4 && id.chars().all(|c| c.is_ascii_alphabetic()) {
+                        return Some(id);
+                    }
                 }
-                // Found a header but no identifier field — stop searching
                 return None;
+            }
+            "16" | "17" => {
+                // Skip seaplane bases (16) and heliports (17) from becoming primary airport code
+                continue;
             }
             _ => continue,
         }

@@ -1683,6 +1683,32 @@ function doesEntryMatchIcaos(entry: SceneryManagerEntry, icaos: Set<string>): bo
   return tokens.some((tok) => icaos.has(tok))
 }
 
+const COMPANION_NOISE_TOKENS = new Set([
+  'the', 'and', 'for', 'with', 'from',
+  'aerosoft', 'flytampa', 'orbx', 'taimodels', 'inibuilds', 'binersim', 'xometry', 'darkblue', 'axonos', 'nimbus', 'simulation', 'simulations',
+  'xp10', 'xp11', 'xp12', 'xplane', 'xplane11', 'xplane12',
+  'apt', 'airport', 'intl', 'international', 'scenery', 'custom', 'mesh', 'overlay', 'overlays',
+])
+
+function getCompanionSignificantTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !COMPANION_NOISE_TOKENS.has(t) && !/^v\d+$/i.test(t))
+}
+
+function isEssentialScenery(entry: SceneryManagerEntry): boolean {
+  const lowerName = entry.folderName.toLowerCase()
+  return (
+    entry.category === 'FixedHighPriority' ||
+    entry.category === 'DefaultAirport' ||
+    entry.category === 'Library' ||
+    lowerName === '*global_airports*' ||
+    lowerName.startsWith('aep') ||
+    lowerName.startsWith('x-plane landmarks')
+  )
+}
+
 function findCompanionPackageNames(
   matchedEntries: SceneryManagerEntry[],
   allEntries: SceneryManagerEntry[],
@@ -1700,14 +1726,16 @@ function findCompanionPackageNames(
     'lights',
     'vfr',
     'photo',
+    'terrain',
   ]
 
   for (const matched of matchedEntries) {
     const matchedName = matched.folderName.toLowerCase()
     const cleanMatched = matchedName.replace(/^([0-9]+[_\-\s]+)/, '')
-    const matchedTokens = matchedName
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length >= 3 && !['the', 'and', 'for', 'aerosoft'].includes(t))
+    const matchedTokens = getCompanionSignificantTokens(matchedName)
+    if (matched.airportId) {
+      matchedTokens.push(matched.airportId.toLowerCase())
+    }
 
     for (const candidate of allEntries) {
       if (candidate.folderName === matched.folderName) continue
@@ -1715,15 +1743,18 @@ function findCompanionPackageNames(
       const cleanCand = candName.replace(/^([0-9]+[_\-\s]+)/, '')
 
       // 1. Direct prefix / subfolder link (e.g. DarkBlue-RJTT_Haneda & DarkBlue-RJTT_Haneda_Overlays1)
-      if (candName.startsWith(matchedName) || cleanCand.startsWith(cleanMatched)) {
+      if (
+        (cleanCand.length >= 5 && cleanMatched.length >= 5 && (cleanCand.startsWith(cleanMatched) || cleanMatched.startsWith(cleanCand))) ||
+        (candName.length >= 5 && matchedName.length >= 5 && (candName.startsWith(matchedName) || matchedName.startsWith(candName)))
+      ) {
         companionNames.add(candidate.folderName)
         continue
       }
 
-      // 2. Contains companion keyword AND shares 1+ significant token (e.g. 1_KDCA_Airport & 2_KDCA_City, 1-iniBuilds-OTHH & 2-iniBuilds-Doha-City)
+      // 2. Contains companion keyword AND shares 1+ significant token (e.g. 1_KDCA_Airport & 2_KDCA_City)
       const hasCompanionKeyword = companionKeywords.some((kw) => candName.includes(kw))
-      if (hasCompanionKeyword) {
-        const candTokens = candName.split(/[^a-z0-9]+/).filter((t) => t.length >= 3)
+      if (hasCompanionKeyword && matchedTokens.length > 0) {
+        const candTokens = getCompanionSignificantTokens(candName)
         const commonTokens = matchedTokens.filter((t) => candTokens.includes(t))
         if (commonTokens.length >= 1) {
           companionNames.add(candidate.folderName)
@@ -1797,6 +1828,18 @@ async function handleApplySmartRouteActivation() {
     ? findCompanionPackageNames(directlyMatchedEntries, sceneryStore.entries)
     : new Set<string>()
 
+  // Detect all custom airports that are NOT in the route
+  const unmatchedAirportEntries = sceneryStore.entries.filter(
+    (e) =>
+      ((e.category === 'Airport' || e.category === 'AirportMesh') || Boolean(e.airportId)) &&
+      !isEssentialScenery(e) &&
+      !doesEntryMatchIcaos(e, routeIcaos),
+  )
+  const unmatchedCompanionSet = findCompanionPackageNames(
+    unmatchedAirportEntries,
+    sceneryStore.entries,
+  )
+
   const activeContinents = new Set<string>()
   for (const icao of routeIcaos) {
     const inferred = inferContinentFromIcao(icao)
@@ -1822,33 +1865,31 @@ async function handleApplySmartRouteActivation() {
     if (entry.category === 'Unrecognized') continue
     if (lockedSet.has(entry.folderName.toLowerCase())) continue
 
-    const lowerName = entry.folderName.toLowerCase()
-    const isEssential =
-      entry.category === 'FixedHighPriority' ||
-      entry.category === 'DefaultAirport' ||
-      entry.category === 'Library' ||
-      lowerName === '*global_airports*' ||
-      lowerName.startsWith('aep') ||
-      lowerName.startsWith('x-plane landmarks')
-
+    const isEssential = isEssentialScenery(entry)
     const isDirectMatch = doesEntryMatchIcaos(entry, routeIcaos)
     const isCompanionMatch = companionSet.has(entry.folderName)
+    const hasUnmatchedAirportId = Boolean(
+      entry.airportId && !routeIcaos.has(entry.airportId.trim().toUpperCase()),
+    )
+    const isUnmatchedAirport =
+      ((entry.category === 'Airport' || entry.category === 'AirportMesh') || hasUnmatchedAirportId) &&
+      !isDirectMatch &&
+      !isCompanionMatch
+    const isUnmatchedCompanion = unmatchedCompanionSet.has(entry.folderName)
 
     let shouldEnable = true
     if (isEssential) {
       shouldEnable = true
     } else if (isDirectMatch || isCompanionMatch) {
       shouldEnable = true
+    } else if (isUnmatchedAirport || isUnmatchedCompanion) {
+      // Unused custom airports and their airport-specific companions MUST be disabled
+      shouldEnable = false
     } else if (smartRouteMode.value === 'strict_route') {
-      if (entry.category === 'Airport' || entry.category === 'AirportMesh') {
-        shouldEnable = false
-      } else if (entry.continent && activeContinents.size > 0) {
-        shouldEnable = activeContinents.has(entry.continent)
-      } else {
-        shouldEnable = true
-      }
+      // Strict route: only route airports & essential items enabled; other scenery disabled
+      shouldEnable = false
     } else {
-      // route_continent mode: keep all scenery in active continents enabled, disable other continents
+      // route_continent mode: keep regional scenery (mesh, ortho, regional overlays) in active continents enabled
       if (entry.continent && activeContinents.size > 0) {
         shouldEnable = activeContinents.has(entry.continent)
       } else {

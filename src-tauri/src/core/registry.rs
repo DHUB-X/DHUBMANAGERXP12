@@ -98,6 +98,101 @@ pub fn sync_registry_paths() -> Result<bool> {
     Ok(false)
 }
 
+/// Clean up stale or duplicate uninstall registry entries left by previous installers or updates
+#[cfg(target_os = "windows")]
+pub fn clean_stale_uninstall_entries(current_version: &str) -> Result<()> {
+    let hives = [
+        (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ];
+
+    let current_exe = env::current_exe().ok();
+    let current_dir = current_exe
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().to_lowercase());
+
+    for (predef, path) in hives {
+        let base_key = match RegKey::predef(predef).open_subkey_with_flags(path, KEY_READ | KEY_WRITE) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        let subkey_names: Vec<String> = base_key.enum_keys().filter_map(|k| k.ok()).collect();
+        for subkey_name in subkey_names {
+            let subkey = match base_key.open_subkey(&subkey_name) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+
+            let display_name: String = subkey.get_value::<String, _>("DisplayName").unwrap_or_default();
+            let lower_name = display_name.to_lowercase();
+            if !lower_name.contains("dhub manager") {
+                continue;
+            }
+
+            let display_version: String = subkey.get_value::<String, _>("DisplayVersion").unwrap_or_default();
+            let install_loc: String = subkey.get_value::<String, _>("InstallLocation").unwrap_or_default().to_lowercase();
+            let uninstall_str: String = subkey.get_value::<String, _>("UninstallString").unwrap_or_default().to_lowercase();
+
+            // Check if this registry entry is tied to our install folder
+            let matches_our_folder = if let Some(ref our_dir) = current_dir {
+                (!install_loc.is_empty() && install_loc.contains(our_dir))
+                    || (!uninstall_str.is_empty() && uninstall_str.contains(our_dir))
+            } else {
+                false
+            };
+
+            // Check if the uninstaller exe referenced actually exists
+            let uninstaller_missing = if !uninstall_str.is_empty() {
+                let raw_path = uninstall_str.trim().trim_matches('"');
+                let exe_candidate = if let Some(first_quote_end) = uninstall_str.find("\" ") {
+                    &uninstall_str[1..first_quote_end]
+                } else if let Some(space_pos) = raw_path.find(" /") {
+                    &raw_path[..space_pos]
+                } else {
+                    raw_path
+                };
+                !std::path::Path::new(exe_candidate).exists()
+            } else {
+                false
+            };
+
+            // If it's an older version of the same app, or uninstaller points to deleted files, or version mismatch in same folder:
+            let is_older_version = if !display_version.is_empty() && display_version != current_version {
+                match (
+                    semver::Version::parse(&display_version),
+                    semver::Version::parse(current_version),
+                ) {
+                    (Ok(v_reg), Ok(v_curr)) => v_reg < v_curr,
+                    _ => matches_our_folder,
+                }
+            } else {
+                false
+            };
+
+            if is_older_version || (matches_our_folder && display_version != current_version) || uninstaller_missing {
+                let _ = base_key.delete_subkey_all(&subkey_name);
+                crate::logger::log_info(
+                    &format!(
+                        "Cleaned stale/duplicate Windows uninstall registry entry: {} (v{}, key={})",
+                        display_name, display_version, subkey_name
+                    ),
+                    Some("app"),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clean_stale_uninstall_entries(_current_version: &str) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 use anyhow::Result;
 

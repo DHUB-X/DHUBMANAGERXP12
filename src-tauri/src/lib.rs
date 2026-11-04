@@ -4552,14 +4552,27 @@ pub fn run() {
                     dirs::desktop_dir(),
                     std::env::var_os("PUBLIC").map(|p| std::path::PathBuf::from(p).join("Desktop")),
                 ) {
-                    for app_name in &["DHUB Manager XP12.lnk", "DHUB Manager XP11.lnk", "DHUB Manager.lnk"] {
-                        let user_shortcut = user_desktop.join(app_name);
-                        let public_shortcut = public_desktop.join(app_name);
-                        if user_shortcut.exists() && public_shortcut.exists() {
-                            let _ = std::fs::remove_file(&user_shortcut);
+                    let is_xp12 = env!("CARGO_PKG_DESCRIPTION").contains("XP12");
+                    let expected_shortcut = if is_xp12 { "DHUB Manager XP12.lnk" } else { "DHUB Manager XP11.lnk" };
+
+                    // 1. If both public and user desktop have the primary shortcut, remove duplicate from user desktop
+                    let user_expected = user_desktop.join(expected_shortcut);
+                    let public_expected = public_desktop.join(expected_shortcut);
+                    if user_expected.exists() && public_expected.exists() {
+                        let _ = std::fs::remove_file(&user_expected);
+                    }
+
+                    // 2. Remove legacy generic "DHUB Manager.lnk" shortcuts to prevent duplicates
+                    for dt in [&user_desktop, &public_desktop] {
+                        let old_shortcut = dt.join("DHUB Manager.lnk");
+                        if old_shortcut.exists() {
+                            let _ = std::fs::remove_file(&old_shortcut);
                         }
                     }
                 }
+
+                // Clean up stale or duplicate uninstall registry entries
+                let _ = registry::clean_stale_uninstall_entries(env!("CARGO_PKG_VERSION"));
             }
 
             // Setup System Tray Icon & Menu (HWiNFO / Background Monitoring style)

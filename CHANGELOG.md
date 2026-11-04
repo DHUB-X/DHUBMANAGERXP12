@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.6] - 2026-11-04
+
+### Fixed
+- Smart Route Scenery Activator now strictly disables non-route custom airports and their companion packages within the active continent
+- Fixed duplicate application entries in Windows Installed Apps by adding static WiX upgrade code and automatic registry cleanup
+- Eliminated redundant desktop shortcuts after updates by cleaning legacy shortcuts on startup
+- Prevented false duplicate airport warnings on X-Plane default landmarks and special sceneries by enforcing 4-letter alphabetic ICAO checks
+- Corrected categorization and badge display for non-airport companion layers and libraries (e.g. 2_KDCA_City and RescueX_Lib)
+
 ## [1.0.5] - 2026-11-03
 
 ### Fixed
