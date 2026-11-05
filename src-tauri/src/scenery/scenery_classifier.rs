@@ -40,6 +40,22 @@ fn is_sam_folder_name(folder_name: &str) -> bool {
     }) || has_sam_word
 }
 
+pub(crate) fn is_pure_library_folder_name(folder_name: &str) -> bool {
+    let lower = folder_name.trim().to_lowercase();
+    lower.ends_with("_lib")
+        || lower.ends_with("-lib")
+        || lower.ends_with("_library")
+        || lower.ends_with("-library")
+        || lower.ends_with(" library")
+        || lower.contains("object library")
+        || lower.contains("static aircraft library")
+        || lower.contains("_lib_")
+        || lower.starts_with("ff_library")
+        || lower.starts_with("opensceneryx")
+        || lower.starts_with("misterx_library")
+        || lower.starts_with("rescuex_lib")
+}
+
 fn classify_library_folder_name(folder_name: &str) -> SceneryCategory {
     if is_lines3d_folder_name(folder_name) || is_sam_folder_name(folder_name) {
         SceneryCategory::FixedHighPriority
@@ -325,14 +341,12 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
     // Decision Tree:
     // 1. Has apt.dat OR (DSF with WorldEditor creation_agent) → Airport
     if has_apt_dat {
-        let is_lib = has_library_txt
-            || folder_name.to_lowercase().contains("_lib")
-            || folder_name.to_lowercase().contains("library");
+        let is_pure_lib = is_pure_library_folder_name(&folder_name);
         let is_layer = crate::scenery_index::is_non_airport_layer(&folder_name);
 
         let category = if is_global_airports_folder_name(&folder_name) {
             SceneryCategory::DefaultAirport
-        } else if is_lib {
+        } else if is_pure_lib {
             classify_library_folder_name(&folder_name)
         } else if is_layer {
             SceneryCategory::Overlay

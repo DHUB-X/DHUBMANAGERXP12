@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.7] - 2026-11-05
+
+### Fixed
+- Fixed custom airports exporting 3D models or SAM jetways (e.g. RJCC, KMEM, KEWR) being mistakenly classified as libraries
+- Differentiated dedicated object libraries from custom airports with exported libraries
+- Added automatic database cache self-healing to reclassify previously misidentified airports on next launch
+
 ## [1.0.6] - 2026-11-04
 
 ### Fixed

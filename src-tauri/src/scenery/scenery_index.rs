@@ -321,7 +321,8 @@ pub(crate) fn is_non_airport_layer(name: &str) -> bool {
         || lower.contains("roads")
         || lower.ends_with("_lib")
         || lower.ends_with("-lib")
-        || lower.contains("library")
+        || lower.ends_with("_library")
+        || lower.ends_with(" library")
 }
 
 fn extract_airport_icao_key(name: &str, info: &SceneryPackageInfo) -> Option<String> {
@@ -1071,6 +1072,12 @@ impl SceneryIndexManager {
                     }
 
                     if let Some(existing) = index.packages.get(*name) {
+                        if existing.category == SceneryCategory::Library && !crate::scenery_classifier::is_pure_library_folder_name(name) {
+                            return true;
+                        }
+                        if existing.category == SceneryCategory::Airport && crate::scenery_classifier::is_pure_library_folder_name(name) {
+                            return true;
+                        }
                         if let Ok(modified) = get_scenery_effective_modified_time(path) {
                             let mod_secs = modified
                                 .duration_since(SystemTime::UNIX_EPOCH)
