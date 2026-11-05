@@ -66,7 +66,8 @@ fn classify_library_folder_name(folder_name: &str) -> SceneryCategory {
 
 pub(crate) fn is_aep_overlays_folder_name(folder_name: &str) -> bool {
     let lower = folder_name.trim().to_lowercase();
-    lower == "aep overlays"
+    lower == "aep"
+        || lower == "aep overlays"
         || lower == "aep_overlays"
         || lower == "aep-overlays"
         || lower.starts_with("aep overlay")
@@ -343,12 +344,13 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
     if has_apt_dat {
         let is_pure_lib = is_pure_library_folder_name(&folder_name);
         let is_layer = crate::scenery_index::is_non_airport_layer(&folder_name);
+        let parsed_airport_id = parse_airport_id(scenery_path);
 
         let category = if is_global_airports_folder_name(&folder_name) {
             SceneryCategory::DefaultAirport
-        } else if is_pure_lib {
+        } else if is_pure_lib || (has_library_txt && parsed_airport_id.is_none()) {
             classify_library_folder_name(&folder_name)
-        } else if is_layer {
+        } else if is_layer || parsed_airport_id.is_none() {
             SceneryCategory::Overlay
         } else {
             SceneryCategory::Airport
@@ -390,7 +392,7 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
         }
 
         let airport_id = if category == SceneryCategory::Airport {
-            parse_airport_id(scenery_path)
+            parsed_airport_id
         } else {
             None
         };

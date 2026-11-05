@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.8] - 2026-11-05
+
+### Fixed
+- Fixed persistent "Scenery Changes Detected" modal popping up on every refresh for library packages (AEP, Orbxlibs, Boundless, world-models)
+- Correctly classified library packages that contain apt.dat but no land airport runway as libraries
+- Removed redundant reclassification checks during quick scan to ensure quiet and fast refresh cycles
+
 ## [1.0.7] - 2026-11-05
 
 ### Fixed
