@@ -4303,17 +4303,15 @@ pub fn run() {
                 );
                 // Emit event to frontend with the new file paths
                 let _ = app.emit("cli-args", file_args);
+            }
 
-                // Bring window to front
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(e) = window.set_focus() {
-                        logger::log_debug(
-                            &format!("Failed to focus window: {}", e),
-                            Some("app"),
-                            Some("lib.rs"),
-                        );
-                    }
-                }
+            // Bring window to front and restore from tray/minimized state
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                let _ = window.set_always_on_top(true);
+                let _ = window.set_always_on_top(false);
             }
         }))
         .invoke_handler(tauri::generate_handler![
@@ -4631,9 +4629,8 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
-                WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let _ = window.hide();
+                WindowEvent::Destroyed => {
+                    window.app_handle().exit(0);
                 }
                 WindowEvent::Resized(_) => {
                     if window.is_minimized().unwrap_or(false) {

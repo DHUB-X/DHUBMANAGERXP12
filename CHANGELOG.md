@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.0] - 2026-11-07
+
+### Fixed
+- Fixed window close ('X') button minimizing to system tray instead of exiting the application
+- Fixed single-instance handler so DHUB automatically unminimizes, shows, and focuses to foreground when installing files from Windows Explorer
+- Fixed AEP texture library mistakenly classified as Airport instead of Library
+- Fixed heliports, seaplane bases, and default Laminar landmarks/airports being erroneously categorized as Library or Overlay
+- Extended apt.dat airport parser to recognize heliports (17), seaplanes (16), and 1302 icao_code metadata
+- Added database self-healing migration to restore misclassified heliports, landmarks, and libraries to their proper categories automatically
+
 ## [1.0.9] - 2026-11-07
 
 ### Fixed
