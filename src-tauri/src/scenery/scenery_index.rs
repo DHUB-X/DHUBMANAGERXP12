@@ -946,6 +946,21 @@ impl SceneryIndexManager {
             } else if is_special_airport_tier_folder_name(name) {
                 info.category = SceneryCategory::Airport;
                 info.original_category = Some(SceneryCategory::Airport);
+            } else if info.category == SceneryCategory::Airport && !info.has_apt_dat {
+                let new_cat = if info.has_library_txt {
+                    crate::scenery_classifier::classify_library_folder_name(name)
+                } else {
+                    SceneryCategory::Overlay
+                };
+                info.category = new_cat.clone();
+                info.original_category = Some(new_cat);
+            } else if (info.category == SceneryCategory::Library || info.category == SceneryCategory::Overlay)
+                && info.has_apt_dat
+                && !crate::scenery_classifier::is_pure_library_folder_name(name)
+                && !is_non_airport_layer(name)
+            {
+                info.category = SceneryCategory::Airport;
+                info.original_category = Some(SceneryCategory::Airport);
             }
 
             info.sub_priority = calculate_sub_priority(&info.category, name);
@@ -1188,14 +1203,35 @@ impl SceneryIndexManager {
             // Migrate any packages whose sub_priority or special Airport tier category is outdated
             let mut sub_priority_migrated = false;
             for (name, info) in index.packages.iter_mut() {
-                if !locked_name_set.contains(&name.to_lowercase())
-                    && is_special_airport_tier_folder_name(name)
-                    && (info.category != SceneryCategory::Airport
-                        || info.original_category != Some(SceneryCategory::Airport))
-                {
-                    info.category = SceneryCategory::Airport;
-                    info.original_category = Some(SceneryCategory::Airport);
-                    sub_priority_migrated = true;
+                if !locked_name_set.contains(&name.to_lowercase()) {
+                    if is_special_airport_tier_folder_name(name) {
+                        if info.category != SceneryCategory::Airport
+                            || info.original_category != Some(SceneryCategory::Airport)
+                        {
+                            info.category = SceneryCategory::Airport;
+                            info.original_category = Some(SceneryCategory::Airport);
+                            sub_priority_migrated = true;
+                        }
+                    } else if info.category == SceneryCategory::Airport && !info.has_apt_dat {
+                        let new_cat = if info.has_library_txt {
+                            crate::scenery_classifier::classify_library_folder_name(name)
+                        } else {
+                            SceneryCategory::Overlay
+                        };
+                        if info.category != new_cat {
+                            info.category = new_cat.clone();
+                            info.original_category = Some(new_cat);
+                            sub_priority_migrated = true;
+                        }
+                    } else if (info.category == SceneryCategory::Library || info.category == SceneryCategory::Overlay)
+                        && info.has_apt_dat
+                        && !crate::scenery_classifier::is_pure_library_folder_name(name)
+                        && !is_non_airport_layer(name)
+                    {
+                        info.category = SceneryCategory::Airport;
+                        info.original_category = Some(SceneryCategory::Airport);
+                        sub_priority_migrated = true;
+                    }
                 }
                 let expected_sub = calculate_sub_priority(&info.category, name);
                 if info.sub_priority != expected_sub {
@@ -1581,6 +1617,28 @@ impl SceneryIndexManager {
                 info.sub_priority = 0;
                 category_changed = true;
             } else if !is_locked && is_special_airport_tier_folder_name(name) {
+                if info.category != SceneryCategory::Airport {
+                    info.category = SceneryCategory::Airport;
+                    category_changed = true;
+                }
+                info.original_category = Some(SceneryCategory::Airport);
+            } else if !is_locked && info.category == SceneryCategory::Airport && !info.has_apt_dat {
+                let new_cat = if info.has_library_txt {
+                    crate::scenery_classifier::classify_library_folder_name(name)
+                } else {
+                    SceneryCategory::Overlay
+                };
+                if info.category != new_cat {
+                    info.category = new_cat.clone();
+                    category_changed = true;
+                }
+                info.original_category = Some(new_cat);
+            } else if !is_locked
+                && (info.category == SceneryCategory::Library || info.category == SceneryCategory::Overlay)
+                && info.has_apt_dat
+                && !crate::scenery_classifier::is_pure_library_folder_name(name)
+                && !is_non_airport_layer(name)
+            {
                 if info.category != SceneryCategory::Airport {
                     info.category = SceneryCategory::Airport;
                     category_changed = true;

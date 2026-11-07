@@ -56,7 +56,7 @@ pub(crate) fn is_pure_library_folder_name(folder_name: &str) -> bool {
         || lower.starts_with("rescuex_lib")
 }
 
-fn classify_library_folder_name(folder_name: &str) -> SceneryCategory {
+pub(crate) fn classify_library_folder_name(folder_name: &str) -> SceneryCategory {
     if is_lines3d_folder_name(folder_name) || is_sam_folder_name(folder_name) {
         SceneryCategory::FixedHighPriority
     } else {
@@ -66,8 +66,7 @@ fn classify_library_folder_name(folder_name: &str) -> SceneryCategory {
 
 pub(crate) fn is_aep_overlays_folder_name(folder_name: &str) -> bool {
     let lower = folder_name.trim().to_lowercase();
-    lower == "aep"
-        || lower == "aep overlays"
+    lower == "aep overlays"
         || lower == "aep_overlays"
         || lower == "aep-overlays"
         || lower.starts_with("aep overlay")
@@ -344,13 +343,15 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
     if has_apt_dat {
         let is_pure_lib = is_pure_library_folder_name(&folder_name);
         let is_layer = crate::scenery_index::is_non_airport_layer(&folder_name);
-        let parsed_airport_id = parse_airport_id(scenery_path);
+        let is_special_tier = is_special_airport_tier_folder_name(&folder_name);
 
         let category = if is_global_airports_folder_name(&folder_name) {
             SceneryCategory::DefaultAirport
-        } else if is_pure_lib || (has_library_txt && parsed_airport_id.is_none()) {
+        } else if is_special_tier {
+            SceneryCategory::Airport
+        } else if is_pure_lib {
             classify_library_folder_name(&folder_name)
-        } else if is_layer || parsed_airport_id.is_none() {
+        } else if is_layer {
             SceneryCategory::Overlay
         } else {
             SceneryCategory::Airport
@@ -392,7 +393,7 @@ pub fn classify_scenery(scenery_path: &Path, _xplane_path: &Path) -> Result<Scen
         }
 
         let airport_id = if category == SceneryCategory::Airport {
-            parsed_airport_id
+            parse_airport_id(scenery_path)
         } else {
             None
         };
@@ -777,20 +778,25 @@ fn parse_airport_id(scenery_path: &Path) -> Option<String> {
             continue;
         }
         match fields[0] {
-            "1" => {
-                // Land Airport header line: fields[4] is the airport identifier
+            "1" | "16" | "17" => {
+                // Land Airport, Seaplane Base, or Heliport header line
                 if fields.len() >= 5 {
                     let id = fields[4].trim().to_uppercase();
                     if id.len() == 4 && id.chars().all(|c| c.is_ascii_alphabetic()) {
                         return Some(id);
                     }
                 }
-                return None;
             }
-            "16" | "17" => {
-                // Skip seaplane bases (16) and heliports (17) from becoming primary airport code
-                continue;
+            "1302" => {
+                // Metadata: 1302 icao_code <ICAO>
+                if fields.len() >= 3 && fields[1].eq_ignore_ascii_case("icao_code") {
+                    let id = fields[2].trim().to_uppercase();
+                    if id.len() == 4 && id.chars().all(|c| c.is_ascii_alphabetic()) {
+                        return Some(id);
+                    }
+                }
             }
+            "99" => break,
             _ => continue,
         }
     }
@@ -1826,6 +1832,17 @@ mod tests {
         assert!(is_lines3d_folder_name("Lines3D"));
         assert!(is_lines3d_folder_name("lines3d"));
         assert!(!is_lines3d_folder_name("Lines3D_expanded_documentation"));
+    }
+
+    #[test]
+    fn test_aep_and_aep_overlays_detection() {
+        assert!(!is_aep_overlays_folder_name("AEP"));
+        assert!(!is_aep_overlays_folder_name("aep"));
+        assert!(!is_special_airport_tier_folder_name("AEP"));
+
+        assert!(is_aep_overlays_folder_name("AEP Overlays"));
+        assert!(is_aep_overlays_folder_name("aep_overlays"));
+        assert!(is_special_airport_tier_folder_name("AEP Overlays"));
     }
 
     #[test]
