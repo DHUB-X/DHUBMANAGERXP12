@@ -3221,7 +3221,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("XFast Manager")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .build()
         .context("Failed to build HTTP client")
 }

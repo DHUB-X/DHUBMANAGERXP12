@@ -998,13 +998,15 @@ fn expand_blacklist_delete_files(
     Ok(delete_files)
 }
 
+const SKUNK_HTTP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 async fn prepare_update_context(target_path: &Path, use_beta: bool) -> Result<PreparedUpdate> {
     let local = read_local_config(target_path)?;
     let module_url = select_module_url(&local, use_beta)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .user_agent("XFast Manager")
+        .user_agent(SKUNK_HTTP_USER_AGENT)
         .build()
         .context("Failed to build HTTP client")?;
 
@@ -1414,7 +1416,7 @@ async fn download_files(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("XFast Manager")
+        .user_agent(SKUNK_HTTP_USER_AGENT)
         .build()
         .context("Failed to build HTTP client")?;
 

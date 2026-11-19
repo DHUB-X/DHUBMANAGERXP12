@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.2] - 2026-11-20
+
+### Fixed
+- Fixed HTTP 403 Forbidden errors from CloudFront-protected addon update servers (such as Colimata FXP Concorde) by using a standard browser User-Agent
+
 ## [1.2.1] - 2026-11-20
 
 ### Removed
