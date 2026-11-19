@@ -319,6 +319,244 @@
           </section>
         </transition>
 
+        <!-- Windows Defender Exclusion (Windows only) -->
+        <transition name="slide-up">
+          <section
+            v-if="store.isWindows"
+            class="bg-white/80 dark:bg-gray-800/40 backdrop-blur-md border border-gray-200 dark:border-white/5 rounded-xl shadow-sm dark:shadow-md transition-colors duration-300 md:col-span-2"
+          >
+            <div
+              class="p-4 cursor-pointer hover:bg-gray-50/50 dark:hover:bg-gray-700/20 transition-colors rounded-t-xl"
+              @click="defenderExpanded = !defenderExpanded"
+            >
+              <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3 flex-1">
+                  <div
+                    class="w-8 h-8 bg-emerald-100 dark:bg-emerald-500/10 rounded-lg flex items-center justify-center flex-shrink-0 text-emerald-600 dark:text-emerald-400"
+                  >
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
+                      ></path>
+                    </svg>
+                  </div>
+                  <div class="flex-1">
+                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      <AnimatedText>{{ $t('settings.defenderExclusion') }}</AnimatedText>
+                    </h3>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      <AnimatedText>{{ $t('settings.defenderExclusionDesc') }}</AnimatedText>
+                    </p>
+                  </div>
+                </div>
+
+                <div class="flex items-center space-x-3">
+                  <ToggleSwitch
+                    size="lg"
+                    :model-value="store.defenderExclusionEnabled"
+                    active-class="bg-emerald-600"
+                    inactive-class="bg-gray-300 dark:bg-gray-700"
+                    :disabled="isDefenderProcessing"
+                    @update:model-value="toggleDefenderExclusion"
+                  />
+
+                  <!-- Expand/Collapse indicator -->
+                  <svg
+                    class="w-5 h-5 text-gray-400 transition-transform duration-200"
+                    :class="{ 'rotate-180': defenderExpanded }"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M19 9l-7 7-7-7"
+                    ></path>
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- Expanded content -->
+            <transition name="expand">
+              <div v-if="defenderExpanded" class="px-4 pb-4 space-y-3">
+                <div
+                  class="bg-emerald-50/50 dark:bg-emerald-500/5 border border-emerald-200 dark:border-emerald-500/20 rounded-lg p-3 space-y-2"
+                >
+                  <h4 class="text-xs font-semibold text-emerald-900 dark:text-emerald-300">
+                    <AnimatedText>{{ $t('settings.defenderExclusionExplain') }}</AnimatedText>
+                  </h4>
+                  <ul class="text-xs text-emerald-800 dark:text-emerald-200 space-y-1.5">
+                    <li class="flex items-start space-x-2">
+                      <svg
+                        class="w-4 h-4 text-emerald-500 dark:text-emerald-400 flex-shrink-0 mt-0.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 13l4 4L19 7"
+                        ></path>
+                      </svg>
+                      <span
+                        ><AnimatedText>{{
+                          $t('settings.defenderExclusionBenefit1')
+                        }}</AnimatedText></span
+                      >
+                    </li>
+                    <li class="flex items-start space-x-2">
+                      <svg
+                        class="w-4 h-4 text-emerald-500 dark:text-emerald-400 flex-shrink-0 mt-0.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 13l4 4L19 7"
+                        ></path>
+                      </svg>
+                      <span
+                        ><AnimatedText>{{
+                          $t('settings.defenderExclusionBenefit2')
+                        }}</AnimatedText></span
+                      >
+                    </li>
+                    <li class="flex items-start space-x-2">
+                      <svg
+                        class="w-4 h-4 text-emerald-500 dark:text-emerald-400 flex-shrink-0 mt-0.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 13l4 4L19 7"
+                        ></path>
+                      </svg>
+                      <span
+                        ><AnimatedText>{{
+                          $t('settings.defenderExclusionBenefit3')
+                        }}</AnimatedText></span
+                      >
+                    </li>
+                    <li class="flex items-start space-x-2">
+                      <svg
+                        class="w-4 h-4 text-emerald-500 dark:text-emerald-400 flex-shrink-0 mt-0.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 13l4 4L19 7"
+                        ></path>
+                      </svg>
+                      <span
+                        ><AnimatedText>{{
+                          $t('settings.defenderExclusionBenefit4')
+                        }}</AnimatedText></span
+                      >
+                    </li>
+                  </ul>
+                </div>
+
+                <!-- Path display and Action button -->
+                <div
+                  class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg border border-gray-100 dark:border-white/5"
+                >
+                  <div class="flex-1 min-w-0">
+                    <span class="text-[11px] font-medium text-gray-500 dark:text-gray-400 block mb-0.5">
+                      {{ $t('settings.defenderExclusionCurrentPath') }}
+                    </span>
+                    <span
+                      class="text-xs font-mono text-gray-800 dark:text-gray-200 truncate block"
+                      :title="store.xplanePath || '-'"
+                    >
+                      {{ store.xplanePath || $t('settings.defenderExclusionPathEmpty') }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      type="button"
+                      :disabled="isDefenderProcessing || !store.xplanePath"
+                      class="px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                      :class="
+                        store.defenderExclusionEnabled
+                          ? 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 dark:bg-rose-500/10 dark:hover:bg-rose-500/20 dark:text-rose-400 dark:border-rose-500/30'
+                          : 'bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-600 dark:hover:bg-emerald-500'
+                      "
+                      @click="toggleDefenderExclusion"
+                    >
+                      <svg
+                        v-if="isDefenderProcessing"
+                        class="w-3.5 h-3.5 animate-spin"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                        ></path>
+                      </svg>
+                      <svg
+                        v-else-if="store.defenderExclusionEnabled"
+                        class="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        ></path>
+                      </svg>
+                      <svg
+                        v-else
+                        class="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M12 4v16m8-8H4"
+                        ></path>
+                      </svg>
+                      <span>{{
+                        store.defenderExclusionEnabled
+                          ? $t('settings.defenderExclusionRemoveBtn')
+                          : $t('settings.defenderExclusionApplyBtn')
+                      }}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </transition>
+          </section>
+        </transition>
+
         <!-- Atomic Installation Mode (Windows only) -->
         <transition name="slide-up">
           <section
@@ -2311,6 +2549,8 @@ const verificationExpanded = ref(false) // Default collapsed
 const atomicExpanded = ref(false) // Default collapsed
 const deleteSourceExpanded = ref(false) // Default collapsed
 const windowsIntegrationExpanded = ref(false) // Default collapsed
+const defenderExpanded = ref(false) // Default collapsed
+const isDefenderProcessing = ref(false)
 const patternSaveStatus = ref<'saving' | 'saved' | null>(null)
 const sceneryAutoSortExpanded = ref(false) // Default collapsed
 const parallelInstallExpanded = ref(false) // Default collapsed
@@ -2443,6 +2683,11 @@ onMounted(async () => {
       }
     } catch (error) {
       logError(`Failed to check context menu status: ${error}`, 'settings')
+    }
+
+    // Check Windows Defender exclusion status
+    if (store.xplanePath) {
+      store.checkDefenderStatus().catch(() => {})
     }
   }
 
@@ -2725,6 +2970,33 @@ async function toggleContextMenu() {
     modal.showError(t('common.error') + ': ' + getErrorMessage(error))
   } finally {
     isProcessing.value = false
+  }
+}
+
+async function toggleDefenderExclusion() {
+  if (isDefenderProcessing.value) return
+  if (!store.xplanePath) {
+    toast.warning(t('settings.defenderExclusionPathEmpty'))
+    return
+  }
+  isDefenderProcessing.value = true
+  try {
+    if (!store.defenderExclusionEnabled) {
+      await store.addDefenderExclusion()
+      toast.success(t('settings.defenderExclusionApplied'))
+    } else {
+      await store.removeDefenderExclusion()
+      toast.success(t('settings.defenderExclusionRemoved'))
+    }
+  } catch (error) {
+    const errorMsg = getErrorMessage(error).toLowerCase()
+    if (errorMsg.includes('cancelled') || errorMsg.includes('dibatalkan')) {
+      toast.info(t('settings.defenderExclusionCancelled'))
+    } else {
+      toast.error(t('settings.defenderExclusionFailed') + ': ' + getErrorMessage(error))
+    }
+  } finally {
+    isDefenderProcessing.value = false
   }
 }
 

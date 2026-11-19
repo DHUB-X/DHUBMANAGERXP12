@@ -348,6 +348,9 @@ impl Installer {
                     ));
                 }
             }
+            crate::models::AddonType::Patch => {
+                // Aircraft patches validate their own staged writes atomically
+            }
         }
 
         Ok(())

@@ -656,6 +656,30 @@ impl Installer {
             return Ok(());
         }
 
+        if task.selected_scenery_option.is_some()
+            && (task.addon_type != AddonType::Scenery || task.scenery_option().is_none())
+        {
+            anyhow::bail!("Invalid scenery installation option");
+        }
+
+        // Patch tasks must always stage, validate and back up before writing,
+        // including when the general atomic-install preference is disabled.
+        if task.addon_type == AddonType::Patch {
+            if task.extraction_chain.is_some()
+                || !task.should_overwrite
+                || task.archive_internal_root.is_some()
+                || task.patch_files.is_empty()
+                || !Self::is_supported_archive_file(source)
+            {
+                return Err(anyhow::anyhow!("Invalid patch installation task"));
+            }
+            return self.install_task_atomic(task, source, target, ctx, password, xplane_path);
+        }
+
+        if task.selected_scenery_option.is_some() {
+            return self.install_task_atomic(task, source, target, ctx, password, xplane_path);
+        }
+
         // Check if this is a nested archive installation
         if let Some(ref chain) = task.extraction_chain {
             crate::log_debug!(
@@ -2285,6 +2309,22 @@ impl Installer {
     ) -> Result<()> {
         use crate::atomic_installer::AtomicInstaller;
 
+        if let Some(option) = task.scenery_option() {
+            validate_scenery_option_root(task, source, option)?;
+        }
+        let patch_root = if matches!(task.addon_type, AddonType::Patch) {
+            let root = task.patch_aircraft_root.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("Patch task is missing its selected aircraft boundary")
+            })?;
+            let root = Path::new(root);
+            if root != target || fs::canonicalize(root)? != root {
+                return Err(anyhow::anyhow!("The selected patch aircraft has moved"));
+            }
+            Some(root)
+        } else {
+            None
+        };
+
         // Use X-Plane root path directly from settings
         let xplane_root = Path::new(xplane_path);
 
@@ -2336,13 +2376,75 @@ impl Installer {
             Some("installer"),
         );
 
-        self.install_content_with_progress(
-            source,
-            atomic.temp_dir(),
-            task.archive_internal_root.as_deref(),
-            ctx,
-            password,
-        )?;
+        if let Some(chain) = &task.extraction_chain {
+            self.install_content_with_extraction_chain(
+                source,
+                atomic.temp_dir(),
+                chain,
+                ctx,
+                password,
+            )?;
+        } else {
+            self.install_content_with_progress(
+                source,
+                atomic.temp_dir(),
+                task.archive_internal_root.as_deref(),
+                ctx,
+                password,
+            )?;
+        }
+
+        if let Some(root) = patch_root {
+            return crate::patch::apply_staged_patch(
+                atomic.temp_dir(),
+                root,
+                task,
+                &self.task_control,
+            );
+        }
+
+        if let Some(option) = task.scenery_option().cloned() {
+            let stage_parent = atomic
+                .temp_dir()
+                .parent()
+                .context("Missing staging parent")?;
+            let replacements = tempfile::tempdir_in(stage_parent)?;
+            if source.is_dir() {
+                self.copy_directory_with_progress(
+                    Path::new(&option.root),
+                    replacements.path(),
+                    ctx,
+                )?;
+            } else if let Some(chain) = &task.extraction_chain {
+                let mut chain = chain.clone();
+                chain.final_internal_root = Some(option.root.clone());
+                self.install_content_with_extraction_chain(
+                    source,
+                    replacements.path(),
+                    &chain,
+                    ctx,
+                    password,
+                )?;
+            } else {
+                self.extract_archive_with_progress(
+                    source,
+                    replacements.path(),
+                    Some(&option.root),
+                    ctx,
+                    password,
+                    None,
+                )?;
+            }
+
+            let _files = apply_scenery_option(atomic.temp_dir(), replacements.path(), &option)?;
+            if self.task_control.is_cancelled() {
+                anyhow::bail!("Installation cancelled");
+            }
+            if self.task_control.is_skip_requested() {
+                self.task_control.reset_skip();
+                anyhow::bail!("Skipped by user");
+            }
+        }
 
         // Step 2: Perform atomic installation based on scenario
         if !target.exists() {
@@ -2445,6 +2547,92 @@ impl Installer {
 
         Ok(())
     }
+}
+
+fn validate_scenery_option_root(
+    task: &InstallTask,
+    source: &Path,
+    option: &crate::models::SceneryInstallOption,
+) -> Result<()> {
+    if source.is_dir() {
+        let input = task
+            .original_input_path
+            .as_deref()
+            .context("Missing scenery package folder")?;
+        let package = fs::canonicalize(input)?;
+        let base = fs::canonicalize(source)?;
+        let replacement = fs::canonicalize(&option.root)?;
+        if !base.starts_with(&package)
+            || !replacement.starts_with(package)
+            || replacement == base
+            || base.starts_with(replacement)
+        {
+            anyhow::bail!("Scenery option is outside the package");
+        }
+    } else {
+        let base = task
+            .extraction_chain
+            .as_ref()
+            .and_then(|chain| chain.final_internal_root.as_deref())
+            .or(task.archive_internal_root.as_deref())
+            .and_then(crate::package_artifacts::normalize_safe_relative_path)
+            .context("Missing base scenery folder in the archive")?;
+        let replacement = crate::package_artifacts::normalize_safe_relative_path(&option.root)
+            .context("Invalid scenery option folder")?;
+        if replacement == base || base.starts_with(&replacement) {
+            anyhow::bail!("Scenery option overlaps the base scenery");
+        }
+    }
+    for file in &option.files {
+        crate::package_artifacts::normalize_safe_relative_path(&file.source)
+            .context("Invalid scenery option source")?;
+        crate::package_artifacts::normalize_safe_relative_path(&file.destination)
+            .filter(|path| path.starts_with("Earth nav data") && path.components().count() > 1)
+            .context("Invalid scenery option destination")?;
+    }
+    Ok(())
+}
+
+fn apply_scenery_option(
+    base: &Path,
+    replacements: &Path,
+    option: &crate::models::SceneryInstallOption,
+) -> Result<Vec<PathBuf>> {
+    use crate::package_artifacts::normalize_safe_relative_path;
+
+    let files = option
+        .files
+        .iter()
+        .map(|entry| {
+            let source = normalize_safe_relative_path(&entry.source)
+                .with_context(|| format!("Invalid scenery option source: {}", entry.source))?;
+            let destination = normalize_safe_relative_path(&entry.destination)
+                .filter(|file| file.starts_with("Earth nav data") && file.components().count() > 1)
+                .with_context(|| {
+                    format!("Invalid scenery option destination: {}", entry.destination)
+                })?;
+            Ok((source, destination))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(!files.is_empty(), "Empty scenery option");
+
+    for (source, destination) in &files {
+        let from = replacements.join(source);
+        let to = base.join(destination);
+        anyhow::ensure!(
+            fs::symlink_metadata(&from).is_ok_and(|entry| entry.is_file())
+                && fs::symlink_metadata(&to).is_ok_and(|entry| entry.is_file()),
+            "Scenery option file does not match the base package: {}",
+            destination.display()
+        );
+    }
+    for (source, destination) in &files {
+        fs::copy(replacements.join(source), base.join(destination))?;
+    }
+    Ok(files
+        .into_iter()
+        .map(|(_, destination)| destination)
+        .collect())
 }
 
 #[cfg(test)]

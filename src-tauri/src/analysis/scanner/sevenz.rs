@@ -394,6 +394,20 @@ impl Scanner {
             "scanner_timing"
         );
 
+        scenery_options::attach_archive_options(
+            archive
+                .files
+                .iter()
+                .filter(|entry| !entry.is_directory() && !entry.is_anti_item())
+                .map(|entry| {
+                    scenery_options::PackageFile::new(
+                        entry.name(),
+                        entry.size,
+                        entry.has_crc.then_some(entry.crc as u32),
+                    )
+                }),
+            &mut detected,
+        );
         Ok(detected)
     }
 
@@ -880,6 +894,20 @@ impl Scanner {
             }
         }
 
+        scenery_options::attach_archive_options(
+            archive
+                .files
+                .iter()
+                .filter(|entry| !entry.is_directory() && !entry.is_anti_item())
+                .map(|entry| {
+                    scenery_options::PackageFile::new(
+                        entry.name(),
+                        entry.size,
+                        entry.has_crc.then_some(entry.crc as u32),
+                    )
+                }),
+            &mut detected,
+        );
         Ok(detected)
     }
 

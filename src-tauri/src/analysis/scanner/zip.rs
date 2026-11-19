@@ -154,6 +154,7 @@ impl Scanner {
 
         let mut plugin_dirs: HashSet<String> = HashSet::new();
         let mut aircraft_dirs: HashSet<String> = HashSet::new();
+        let mut option_files = Vec::new();
         let mut marker_files: Vec<(usize, String, bool, &str)> = Vec::new(); // (index, path, encrypted, marker_type)
         let mut nested_archives: Vec<(usize, String, bool)> = Vec::new(); // (index, path, encrypted)
         let mut has_encrypted = false;
@@ -190,6 +191,13 @@ impl Scanner {
             }
 
             let file_path = file.name().replace('\\', "/");
+            if !file.is_dir() {
+                option_files.push(scenery_options::PackageFile::new(
+                    file_path.clone(),
+                    file.size(),
+                    Some(file.crc32()),
+                ));
+            }
 
             // Skip ignored paths
             if Self::should_ignore_archive_path(&file_path) {
@@ -548,6 +556,7 @@ impl Scanner {
             "scanner_timing"
         );
 
+        scenery_options::attach_archive_options(option_files, &mut detected);
         Ok(detected)
     }
 
@@ -792,6 +801,7 @@ impl Scanner {
         // First pass: collect all file paths and identify directories/markers
         let mut plugin_dirs: HashSet<String> = HashSet::new();
         let mut aircraft_dirs: HashSet<String> = HashSet::new();
+        let mut option_files = Vec::new();
         let mut marker_files: Vec<(usize, String, &str)> = Vec::new(); // (index, path, marker_type)
         let mut detected_livery_roots: HashSet<String> = HashSet::new();
         let mut has_encrypted = false;
@@ -803,6 +813,13 @@ impl Scanner {
                 has_encrypted = true;
             }
             let file_path = file.name().replace('\\', "/");
+            if !file.is_dir() {
+                option_files.push(scenery_options::PackageFile::new(
+                    file_path.clone(),
+                    file.size(),
+                    Some(file.crc32()),
+                ));
+            }
 
             // Skip ignored paths
             if Self::should_ignore_archive_path(&file_path) {
@@ -984,6 +1001,7 @@ impl Scanner {
             }
         }
 
+        scenery_options::attach_archive_options(option_files, &mut detected);
         Ok(detected)
     }
 
@@ -1049,6 +1067,7 @@ impl Scanner {
         let enumerate_start = std::time::Instant::now();
         let mut plugin_dirs: HashSet<String> = HashSet::new();
         let mut aircraft_dirs: HashSet<String> = HashSet::new();
+        let mut option_files = Vec::new();
         let mut marker_files: Vec<(usize, String, bool, &str)> = Vec::new(); // (index, path, encrypted, marker_type)
         let mut has_encrypted = false;
         let mut detected_livery_roots: HashSet<String> = HashSet::new();
@@ -1084,6 +1103,13 @@ impl Scanner {
             }
 
             let file_path = file.name().replace('\\', "/");
+            if !file.is_dir() {
+                option_files.push(scenery_options::PackageFile::new(
+                    file_path.clone(),
+                    file.size(),
+                    Some(file.crc32()),
+                ));
+            }
 
             // Skip ignored paths
             if Self::should_ignore_archive_path(&file_path) {
@@ -1316,6 +1342,7 @@ impl Scanner {
             }
         }
 
+        scenery_options::attach_archive_options(option_files, &mut detected);
         Ok(detected)
     }
 }

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { AddonType, type InstallTask, type InstallResult } from '@/types'
 import { invokeVoidCommand } from '@/services/api'
 import { useLockStore } from './lock'
@@ -15,6 +16,8 @@ export interface TaskState {
   overwrite: boolean
   /** Whether large size warning has been confirmed */
   sizeConfirmed: boolean
+  /** Selected scenery option root (undefined = package default) */
+  sceneryOption?: string
   /** Backup settings for aircraft tasks */
   backup: {
     liveries: boolean
@@ -39,6 +42,7 @@ export const useAppStore = defineStore('app', () => {
   // Platform detection (initialized at app startup)
   const isWindows = ref(false)
   const isContextMenuRegistered = ref(false)
+  const defenderExclusionEnabled = ref(false)
   const isXcslDev = ref(false)
 
   // Log level setting (basic, full, debug)
@@ -69,6 +73,7 @@ export const useAppStore = defineStore('app', () => {
     [AddonType.Navdata]: true,
     [AddonType.Livery]: true,
     [AddonType.LuaScript]: true,
+    [AddonType.Patch]: true,
   })
 
   // Verification preferences by source type (default: all enabled except RAR)
@@ -250,6 +255,12 @@ export const useAppStore = defineStore('app', () => {
       atomicInstallEnabled.value = savedAtomicInstall
     }
 
+    // Load defender exclusion setting
+    const savedDefenderExclusion = await getItem<boolean>(STORAGE_KEYS.DEFENDER_EXCLUSION_ENABLED)
+    if (typeof savedDefenderExclusion === 'boolean') {
+      defenderExclusionEnabled.value = savedDefenderExclusion
+    }
+
     // Load delete source after install setting
     const savedDeleteSource = await getItem<boolean>(STORAGE_KEYS.DELETE_SOURCE_AFTER_INSTALL)
     if (typeof savedDeleteSource === 'boolean') {
@@ -333,6 +344,38 @@ export const useAppStore = defineStore('app', () => {
   async function toggleAtomicInstall() {
     atomicInstallEnabled.value = !atomicInstallEnabled.value
     await setItem(STORAGE_KEYS.ATOMIC_INSTALL_ENABLED, atomicInstallEnabled.value)
+  }
+
+  async function checkDefenderStatus(path?: string): Promise<boolean> {
+    if (!isWindows.value) return false
+    const targetPath = path || xplanePath.value
+    if (!targetPath) return false
+    try {
+      const isExcluded = await invoke<boolean>('check_defender_exclusion', { path: targetPath })
+      if (isExcluded) {
+        defenderExclusionEnabled.value = true
+        await setItem(STORAGE_KEYS.DEFENDER_EXCLUSION_ENABLED, true)
+      }
+      return isExcluded
+    } catch {
+      return defenderExclusionEnabled.value
+    }
+  }
+
+  async function addDefenderExclusion(path?: string): Promise<void> {
+    const targetPath = path || xplanePath.value
+    if (!targetPath) throw new Error('X-Plane path is not set')
+    await invoke('add_defender_exclusion', { path: targetPath })
+    defenderExclusionEnabled.value = true
+    await setItem(STORAGE_KEYS.DEFENDER_EXCLUSION_ENABLED, true)
+  }
+
+  async function removeDefenderExclusion(path?: string): Promise<void> {
+    const targetPath = path || xplanePath.value
+    if (!targetPath) throw new Error('X-Plane path is not set')
+    await invoke('remove_defender_exclusion', { path: targetPath })
+    defenderExclusionEnabled.value = false
+    await setItem(STORAGE_KEYS.DEFENDER_EXCLUSION_ENABLED, false)
   }
 
   async function toggleDeleteSourceAfterInstall() {
@@ -470,6 +513,7 @@ export const useAppStore = defineStore('app', () => {
         ...task,
         shouldOverwrite: state.overwrite,
         sizeConfirmed: state.sizeConfirmed,
+        selectedSceneryOption: state.sceneryOption,
         backupLiveries: state.backup.liveries,
         // Only enable config file backup if patterns are configured
         backupConfigFiles: configFilePatterns.value.length > 0 && state.backup.configFiles,
@@ -652,6 +696,7 @@ export const useAppStore = defineStore('app', () => {
     isAnalyzeInProgress,
     isWindows,
     isContextMenuRegistered,
+    defenderExclusionEnabled,
     isXcslDev,
     installPreferences,
     verificationPreferences,
@@ -689,6 +734,9 @@ export const useAppStore = defineStore('app', () => {
     togglePreference,
     toggleVerificationPreference,
     toggleAtomicInstall,
+    checkDefenderStatus,
+    addDefenderExclusion,
+    removeDefenderExclusion,
     toggleDeleteSourceAfterInstall,
     toggleAutoSortScenery,
     setXplaneLaunchArgs,

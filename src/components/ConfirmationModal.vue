@@ -122,7 +122,23 @@
           <TaskListSection />
 
           <!-- Actions -->
-          <div class="flex justify-end gap-1.5 flex-shrink-0 pt-1.5">
+          <div class="flex items-center justify-between gap-2 flex-shrink-0 pt-1.5">
+            <button
+              class="px-2.5 py-1.5 text-xs font-medium text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-500/10 rounded-lg transition-all duration-200 flex items-center space-x-1"
+              :title="$t('patch.thisIsPatchHint')"
+              @click="$emit('install-as-patch')"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"
+                ></path>
+              </svg>
+              <span><AnimatedText>{{ $t('patch.thisIsPatch') }}</AnimatedText></span>
+            </button>
+            <div class="flex gap-1.5">
             <button
               class="px-3.5 py-2 bg-gray-200 dark:bg-slate-800/80 hover:bg-gray-300 dark:hover:bg-slate-700/80 text-gray-700 dark:text-slate-200 border border-transparent dark:border-slate-700/60 rounded-xl transition-all duration-200 hover:scale-105 active:scale-95 text-xs font-medium flex items-center space-x-1"
               @click="$emit('close')"
@@ -161,6 +177,7 @@
                 ><AnimatedText>{{ $t('modal.startInstallation') }}</AnimatedText></span
               >
             </button>
+            </div>
           </div>
         </div>
       </div>
@@ -176,7 +193,7 @@ import TaskListSection from '@/components/confirmation/TaskListSection.vue'
 
 const store = useAppStore()
 
-defineEmits(['close', 'confirm'])
+defineEmits(['close', 'confirm', 'install-as-patch'])
 
 // Check if install button should be disabled
 const installDisabled = computed(() => {

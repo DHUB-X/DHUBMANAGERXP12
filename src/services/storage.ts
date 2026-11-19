@@ -101,6 +101,8 @@ export async function hasKey(key: string): Promise<boolean> {
  */
 export const STORAGE_KEYS = {
   XPLANE_PATH: 'xplanePath',
+  DEFENDER_EXCLUSION_ENABLED: 'defenderExclusionEnabled',
+  PATCH_MAPPING_PREFIX: 'patchMapping:',
   INSTALL_PREFERENCES: 'installPreferences',
   VERIFICATION_PREFERENCES: 'verificationPreferences',
   ATOMIC_INSTALL_ENABLED: 'atomicInstallEnabled',

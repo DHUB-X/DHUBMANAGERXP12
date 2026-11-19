@@ -188,6 +188,8 @@ export enum AddonType {
   Livery = 'Livery',
   /** FlyWithLua Lua script */
   LuaScript = 'LuaScript',
+  /** Aircraft model/sound patch */
+  Patch = 'Patch',
 }
 
 /** Represents a nested archive within another archive */
@@ -265,6 +267,103 @@ export interface InstallTask {
   flyWithLuaInstalled?: boolean
   /** For LuaScript: companion files/folders referenced by SCRIPT_DIRECTORY */
   companionPaths?: string[]
+  /** Optional replacements bundled alongside a scenery's default files */
+  sceneryOptions?: SceneryInstallOption[]
+  selectedSceneryOption?: string
+  /** Patch task fields */
+  patchFiles?: PatchFileWrite[]
+  patchPlanId?: string
+  patchBackup?: boolean
+  patchBackupDir?: string
+  patchAircraftRoot?: string
+  patchCleanFmod?: boolean
+}
+
+export interface SceneryOptionFile {
+  source: string
+  destination: string
+}
+
+export interface SceneryInstallOption {
+  root: string
+  name: string
+  files: SceneryOptionFile[]
+}
+
+export interface PatchFileWrite {
+  archivePath: string
+  destination: string
+  overwrite: boolean
+}
+
+export type PatchConfidence = 'high' | 'medium' | 'low'
+
+export interface PatchAircraftCandidate {
+  folderName: string
+  displayName: string
+  matchedCount: number
+  fileCount: number
+  matchScore: number
+  bestOffset: string
+  bestDestination: string
+  ambiguousMapping: boolean
+  confidence: PatchConfidence
+}
+
+export interface PatchTargetDetection {
+  candidates: PatchAircraftCandidate[]
+  recommendedFolder?: string | null
+}
+
+export interface PatchMapping {
+  archiveSubpath: string
+  destSubpath: string
+  fileCount: number
+  confidence: PatchConfidence
+  reason: string
+}
+
+export interface PatchPlan {
+  archiveTree: string[]
+  suggestedMappings: PatchMapping[]
+  unmapped: string[]
+  aircraftDirectories: string[]
+  mappingKey: string
+}
+
+export interface PatchMappingInput {
+  archiveSubpath: string
+  destSubpath: string
+}
+
+export interface PatchMappingPreview {
+  fileCount: number
+  overwriteCount: number
+  destinationExists: boolean
+}
+
+export interface PatchInstallSummary {
+  totalFiles: number
+  overwriteCount: number
+  planId: string
+  mappingPreviews: PatchMappingPreview[]
+  unmapped: string[]
+}
+
+export interface PatchBackupSession {
+  id: string
+  name: string
+  timestamp: number | null
+  files: { path: string; sizeBytes: number }[]
+  addedFiles: string[] | null
+  error: string | null
+}
+
+export interface PatchRestoreResult {
+  restoredCount: number
+  removedCount: number
+  skippedCount: number
+  backupCleanupError: string | null
 }
 
 export interface AnalysisResult {
@@ -897,4 +996,117 @@ export interface GatewayReleaseContext {
   matchedReleaseVersion: string | null
   matchedReleaseDate: string | null
   comparisonAvailable: boolean
+}
+
+// ============================================================================
+// Doctor — diagnostic reports (mirrors src-tauri/src/analysis/doctor.rs)
+// ============================================================================
+
+export interface DetectedInjector {
+  id: string
+  evidence: string
+}
+
+export interface CompetingOrganizer {
+  id: string
+  evidence: string
+}
+
+export interface DoctorFileFindings {
+  problems: string[]
+  errors: string[]
+}
+
+export interface DoctorVolumeSpace {
+  availableBytes: number | null
+  totalBytes: number | null
+  error: string | null
+}
+
+export type DoctorVulkanRuntime =
+  | { state: 'available'; version: string; meetsMinimum: boolean }
+  | { state: 'missing' | 'unavailable'; detail: string }
+
+export interface DoctorEnvironmentReport {
+  installationId: string
+  installation: {
+    rootUsable: boolean
+    core: DoctorFileFindings
+    aircraft: DoctorFileFindings
+    airfoils: DoctorFileFindings
+  }
+  diskSpace: DoctorVolumeSpace
+  directoryAccess: { blocked: string[]; errors: string[] }
+  vulkanRuntime: DoctorVulkanRuntime | null
+  inProgramFiles: boolean
+  isSteamInstall: boolean
+  readonlyCount: number
+  readonlyScanCapped: boolean
+  readonlyScanErrors: string[]
+  readonlyScanPerformed: boolean
+  injectors: DetectedInjector[]
+  competingOrganizers: CompetingOrganizer[]
+  defenderExcluded?: boolean | null
+  system: DoctorHostSystemSnapshot
+}
+
+export interface DoctorHostSystemSnapshot {
+  os: string
+  osVersion: string | null
+  architecture: string
+  cpuModel: string | null
+  logicalCores: number
+  physicalCores: number | null
+  totalMemoryBytes: number
+  availableMemoryBytes: number
+}
+
+export interface DoctorSceneryIndexHealth {
+  indexExists: boolean
+  indexedCount: number
+  filesystemCount: number
+  missingFromIndex: string[]
+  missingFromDisk: string[]
+}
+
+export interface DoctorXfastHealthReport {
+  appDataDir: string
+  appDataWritable: boolean
+  appDataWriteError: string | null
+  diskSpace: DoctorVolumeSpace
+  databaseOk: boolean | null
+  databaseDetails: string[]
+  schemaCompatible: boolean | null
+  sceneryIndex: DoctorSceneryIndexHealth | null
+  sceneryIndexError: string | null
+}
+
+export type NavdataStatus = 'expired' | 'expiring_soon' | 'not_yet_effective' | 'ok' | 'unknown'
+
+export interface NavdataCycleReport {
+  folderName: string
+  providerName: string
+  cycle: string | null
+  airac: string | null
+  effectiveDate: string | null
+  expiryDate: string | null
+  daysRemaining: number | null
+  status: NavdataStatus
+  metadataConflict?: string | null
+  source: string
+}
+
+export interface DoctorNavdataLayer {
+  present: boolean
+  problems: string[]
+  errors: string[]
+  headers: string[]
+}
+
+export interface DoctorNavdataReport {
+  bundled: DoctorNavdataLayer
+  overrideData: DoctorNavdataLayer
+  supplemental: DoctorNavdataLayer
+  cycles: NavdataCycleReport[]
+  metadataErrors: string[]
 }

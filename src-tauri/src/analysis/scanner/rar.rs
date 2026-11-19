@@ -374,11 +374,20 @@ impl Scanner {
         );
 
         let mut files: Vec<String> = Vec::new();
+        let mut option_files = Vec::new();
 
         // Collect all file paths
         let enumerate_start = std::time::Instant::now();
         for e in archive.flatten() {
-            files.push(e.filename.to_string_lossy().to_string().replace('\\', "/"));
+            let file_path = e.filename.to_string_lossy().to_string().replace('\\', "/");
+            if !e.is_directory() {
+                option_files.push(scenery_options::PackageFile::new(
+                    file_path.clone(),
+                    e.unpacked_size,
+                    Some(e.file_crc),
+                ));
+            }
+            files.push(file_path);
         }
 
         crate::log_debug!(
@@ -603,6 +612,7 @@ impl Scanner {
             "scanner_timing"
         );
 
+        scenery_options::attach_archive_options(option_files, &mut detected);
         Ok(detected)
     }
 

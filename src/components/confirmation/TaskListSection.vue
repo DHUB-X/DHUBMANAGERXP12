@@ -77,6 +77,31 @@
             >
           </div>
 
+          <!-- Scenery installation options / variant picker -->
+          <label
+            v-if="task.sceneryOptions?.length"
+            class="mt-2 inline-flex max-w-full flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs"
+            @click.stop
+          >
+            <span class="font-medium text-slate-600 dark:text-slate-300">
+              <AnimatedText>{{ $t('modal.sceneryOption') }}</AnimatedText>
+            </span>
+            <select
+              v-model="store.getTaskState(task.id).sceneryOption"
+              :disabled="!store.getTaskEnabled(task.id) || isTaskDisabled(task)"
+              class="max-w-full min-w-[12rem] cursor-pointer truncate rounded-lg border border-gray-300 dark:border-white/15 bg-white dark:bg-gray-900/70 px-2.5 py-1 text-xs font-medium text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option :value="undefined">{{ $t('modal.defaultSceneryOption') }}</option>
+              <option
+                v-for="option in task.sceneryOptions"
+                :key="option.root"
+                :value="option.root"
+              >
+                {{ option.name }} ({{ option.files.length }})
+              </option>
+            </select>
+          </label>
+
           <!-- Lua companion files/folders -->
           <div v-if="task.type === 'LuaScript' && hasLuaCompanions(task)" class="mt-1">
             <button

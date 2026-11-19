@@ -14,6 +14,8 @@ use crate::models::{
 
 #[path = "rar.rs"]
 mod rar;
+#[path = "scenery_options.rs"]
+mod scenery_options;
 #[path = "sevenz.rs"]
 mod sevenz;
 #[path = "zip.rs"]
@@ -774,6 +776,7 @@ impl Scanner {
             }
         }
 
+        scenery_options::attach_directory_options(dir, &mut detected);
         Ok(detected)
     }
 
@@ -842,6 +845,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -938,6 +942,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1001,6 +1006,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1027,6 +1033,7 @@ impl Scanner {
                 livery_aircraft_type: None,
                 version_info: None,
                 companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
             }))
         } else {
             Ok(None)
@@ -1113,6 +1120,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1164,6 +1172,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1241,6 +1250,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1326,6 +1336,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1391,6 +1402,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1458,6 +1470,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1496,6 +1509,7 @@ impl Scanner {
                 livery_aircraft_type: Some(aircraft_type_id.clone()),
                 version_info: None,
                 companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
             }))
         } else {
             Ok(None)
@@ -1546,6 +1560,7 @@ impl Scanner {
                 livery_aircraft_type: Some(aircraft_type_id.clone()),
                 version_info: None,
                 companion_paths: Vec::new(),
+            scenery_options: Vec::new(),
             }))
         } else {
             Ok(None)
@@ -1650,6 +1665,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths,
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1739,6 +1755,7 @@ impl Scanner {
             livery_aircraft_type: None,
             version_info: None,
             companion_paths,
+            scenery_options: Vec::new(),
         }))
     }
 
@@ -1921,7 +1938,7 @@ impl Scanner {
     }
 
     /// List all entries in an archive
-    fn list_archive_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
+    pub fn list_archive_entries(&self, archive_path: &Path) -> Result<Vec<String>> {
         match detect_archive_format(archive_path) {
             Some(ArchiveFormat::Zip) => self.list_zip_entries(archive_path),
             Some(ArchiveFormat::SevenZ) => self.list_7z_entries(archive_path),

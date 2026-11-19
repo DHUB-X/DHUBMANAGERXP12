@@ -16,6 +16,8 @@ pub enum AddonType {
     Livery,
     /// FlyWithLua Lua script
     LuaScript,
+    /// Aircraft model/sound patch — overlaid (merged) into an existing aircraft folder.
+    Patch,
 }
 
 /// Represents a nested archive within another archive
@@ -184,6 +186,85 @@ pub struct InstallTask {
     /// For LuaScript: companion files/folders referenced by SCRIPT_DIRECTORY
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companion_paths: Vec<String>,
+    /// Optional replacements bundled alongside a scenery's default files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenery_options: Vec<SceneryInstallOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_scenery_option: Option<String>,
+    /// Files selected by the confirmed patch plan, relative to the archive and aircraft roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patch_files: Vec<PatchFileWrite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_plan_id: Option<String>,
+    /// For Patch: back up files that will be overwritten before merging (revertable).
+    #[serde(default)]
+    pub patch_backup: bool,
+    /// For Patch: backup session directory for the complete patch install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_backup_dir: Option<String>,
+    /// Selected aircraft boundary, rechecked before a patch writes any files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_aircraft_root: Option<String>,
+    /// For FMOD Sound Mod Packs: cleanly back up and clear existing fmod/ before installing new sound banks.
+    #[serde(default)]
+    pub patch_clean_fmod: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneryOptionFile {
+    /// Path relative to the option folder.
+    pub source: String,
+    /// Path relative to the base scenery.
+    pub destination: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneryInstallOption {
+    pub root: String,
+    pub name: String,
+    /// How each option file maps into the scenery's Earth nav data folder.
+    pub files: Vec<SceneryOptionFile>,
+}
+
+impl SceneryInstallOption {
+    pub fn source_for(&self, destination: &str) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|file| file.destination == destination)
+            .map(|file| file.source.as_str())
+    }
+
+    pub fn destination_for(&self, source: &str) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|file| file.source == source)
+            .map(|file| file.destination.as_str())
+    }
+
+    pub fn has_destination(&self, destination: &str) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.destination == destination)
+    }
+}
+
+impl InstallTask {
+    pub fn scenery_option(&self) -> Option<&SceneryInstallOption> {
+        let root = self.selected_scenery_option.as_deref()?;
+        self.scenery_options
+            .iter()
+            .find(|option| option.root == root)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchFileWrite {
+    pub archive_path: String,
+    pub destination: String,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,6 +310,7 @@ pub struct DetectedItem {
     pub version_info: Option<VersionInfo>,
     /// For LuaScript: companion files/folders referenced by SCRIPT_DIRECTORY
     pub companion_paths: Vec<String>,
+    pub scenery_options: Vec<SceneryInstallOption>,
 }
 
 /// Installation progress event sent to frontend

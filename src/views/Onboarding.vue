@@ -487,6 +487,7 @@ const sponsorTab = ref<'wechat' | 'alipay'>('wechat')
 // Explicit boolean type to prevent TypeScript from inferring literal types
 // For onboarding (first-time use), default these features to enabled
 const windowsIntegrationEnabled = ref<boolean>(store.isContextMenuRegistered ?? true)
+const defenderExclusionEnabled = ref<boolean>(false)
 const atomicInstallEnabled = ref<boolean>(true)
 const deleteSourceEnabled = ref(store.deleteSourceAfterInstall)
 const autoUpdateEnabled = ref(updateStore.autoCheckEnabled)
@@ -560,6 +561,23 @@ const steps = computed(() => {
       isEnabled: () => windowsIntegrationEnabled.value,
       toggle: () => {
         windowsIntegrationEnabled.value = !windowsIntegrationEnabled.value
+      },
+    })
+    items.push({
+      key: 'defenderExclusion',
+      titleKey: 'settings.defenderExclusion',
+      descKey: 'settings.defenderExclusionDesc',
+      benefits: [
+        'settings.defenderExclusionBenefit1',
+        'settings.defenderExclusionBenefit2',
+        'settings.defenderExclusionBenefit3',
+        'settings.defenderExclusionBenefit4',
+      ],
+      onClass: 'bg-emerald-600',
+      disabled: false,
+      isEnabled: () => defenderExclusionEnabled.value,
+      toggle: () => {
+        defenderExclusionEnabled.value = !defenderExclusionEnabled.value
       },
     })
     items.push({
@@ -919,6 +937,19 @@ async function finishOnboarding() {
   try {
     if (store.isWindows) {
       await applyWindowsIntegration(windowsIntegrationEnabled.value)
+      if (defenderExclusionEnabled.value && (xplanePathInput.value || store.xplanePath)) {
+        try {
+          await store.addDefenderExclusion(xplanePathInput.value || store.xplanePath)
+          toast.success(t('settings.defenderExclusionApplied'))
+        } catch (error) {
+          const errorMsg = getErrorMessage(error).toLowerCase()
+          if (errorMsg.includes('cancelled') || errorMsg.includes('dibatalkan')) {
+            toast.info(t('settings.defenderExclusionCancelled'))
+          } else {
+            toast.warning(t('settings.defenderExclusionFailed'))
+          }
+        }
+      }
       if (store.atomicInstallEnabled !== atomicInstallEnabled.value) {
         store.toggleAtomicInstall()
       }
