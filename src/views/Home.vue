@@ -397,7 +397,6 @@
         v-if="showConfirmation"
         @close="showConfirmation = false"
         @confirm="handleInstall"
-        @install-as-patch="openPatchFromConfirmation"
       />
       <PasswordModal
         v-if="showPasswordModal"
@@ -405,20 +404,6 @@
         :error-message="passwordErrorMessage"
         @confirm="handlePasswordSubmit"
         @cancel="handlePasswordCancel"
-      />
-      <PatchInstallModal
-        v-if="patchStore.isModalOpen"
-        :key="
-          JSON.stringify([
-            store.xplanePath,
-            patchStore.archivePath,
-            patchStore.presetAircraftFolder,
-          ])
-        "
-        :archive-path="patchStore.archivePath"
-        :preset-aircraft-folder="patchStore.presetAircraftFolder"
-        @close="patchStore.close()"
-        @install="handlePatchInstall"
       />
 
       <!-- Launch X-Plane Confirmation Dialog -->
@@ -545,7 +530,6 @@ import { useUpdateStore } from '@/stores/update'
 import { useSceneryStore } from '@/stores/scenery'
 import { useManagementStore } from '@/stores/management'
 import { useLockStore } from '@/stores/lock'
-import { usePatchStore } from '@/stores/patch'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
@@ -554,7 +538,6 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import ConfirmationModal from '@/components/ConfirmationModal.vue'
 import PasswordModal from '@/components/PasswordModal.vue'
-import PatchInstallModal from '@/components/PatchInstallModal.vue'
 import AnimatedText from '@/components/AnimatedText.vue'
 import InstallProgressOverlay from '@/components/InstallProgressOverlay.vue'
 import AnalyzingOverlay from '@/components/AnalyzingOverlay.vue'
@@ -574,7 +557,6 @@ const progressStore = useProgressStore()
 const sceneryStore = useSceneryStore()
 const managementStore = useManagementStore()
 const lockStore = useLockStore()
-const patchStore = usePatchStore()
 const isDragging = ref(false)
 const showConfirmation = ref(false)
 const showLaunchConfirmDialog = ref(false)
@@ -1034,11 +1016,11 @@ async function analyzeFiles(paths: string[], passwords?: Record<string, string>)
       } else if (ignoredCount > 0) {
         toast.warning(t('home.allIgnored'))
       } else {
-        await offerPatchOrWarn(paths)
+        toast.warning(t('home.noValidAddons'))
       }
     } else {
       logDebug('No valid addons detected in analysis', 'analysis')
-      await offerPatchOrWarn(paths)
+      toast.warning(t('home.noValidAddons'))
     }
   } catch (error) {
     // Non-blocking log call (also prints to console.error internally)
@@ -1124,45 +1106,6 @@ function resetPasswordState() {
   collectedPasswords.value = {}
   passwordRetryCount.value = 0
   passwordErrorMessage.value = ''
-}
-
-async function offerPatchOrWarn(paths: string[]) {
-  const archive = paths.find((p) => /\.(zip|7z|rar)$/i.test(p))
-  if (archive) {
-    const usePatch = await new Promise<boolean>((resolve) => {
-      modal.showConfirm({
-        title: t('patch.noAddonOfferTitle'),
-        message: t('patch.noAddonOfferMessage'),
-        confirmText: t('patch.installAsPatch'),
-        cancelText: t('common.cancel'),
-        type: 'warning',
-        onConfirm: () => resolve(true),
-        onCancel: () => resolve(false),
-      })
-    })
-    if (usePatch) {
-      patchStore.open(archive)
-      return
-    }
-  }
-  toast.warning(t('home.noValidAddons'))
-}
-
-function openPatchFromConfirmation() {
-  const task = store.currentTasks[0]
-  const archive = task?.sourcePath
-  if (!archive) {
-    toast.warning(t('patch.noArchive'))
-    return
-  }
-  showConfirmation.value = false
-  store.clearTasks()
-  patchStore.open(archive)
-}
-
-async function handlePatchInstall(tasks: InstallTask[]) {
-  patchStore.close()
-  await executeInstall(tasks, { deleteSource: false, parallel: false })
 }
 
 async function handleInstall() {

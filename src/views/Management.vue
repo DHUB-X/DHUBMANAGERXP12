@@ -7,13 +7,9 @@ import { useToastStore } from '@/stores/toast'
 import { useAppStore } from '@/stores/app'
 import { useModalStore } from '@/stores/modal'
 import { useAddonUpdateDrawerStore } from '@/stores/addonUpdateDrawer'
-import { usePatchStore } from '@/stores/patch'
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { getNavdataCycleStatus } from '@/utils/airac'
 import { isDrawerUpdatable } from '@/utils/addonUpdate'
 import AircraftAcfManagerModal from '@/components/AircraftAcfManagerModal.vue'
-import PatchBackupModal from '@/components/PatchBackupModal.vue'
-import EngineModModal, { type EngineModApplyResult } from '@/components/EngineModModal.vue'
 import ManagementEntryCard from '@/components/ManagementEntryCard.vue'
 import SceneryTab from '@/views/SceneryTab.vue'
 import {
@@ -25,7 +21,6 @@ import {
   type NavdataBackupInfo,
   type AddonUpdatableItemType,
   type AddonUpdateDrawerTask,
-  type PatchRestoreResult,
 } from '@/types'
 
 const { t, locale } = useI18n()
@@ -36,80 +31,6 @@ const toastStore = useToastStore()
 const appStore = useAppStore()
 const modalStore = useModalStore()
 const addonUpdateDrawerStore = useAddonUpdateDrawerStore()
-const patchStore = usePatchStore()
-
-const patchBackupTarget = ref<{
-  xplanePath: string
-  folderName: string
-  displayName: string
-} | null>(null)
-
-const engineModTarget = ref<{
-  xplanePath: string
-  folderName: string
-  displayName: string
-} | null>(null)
-
-function handleInstallEngineMod(folderName: string) {
-  engineModTarget.value = {
-    xplanePath: appStore.xplanePath,
-    folderName,
-    displayName:
-      managementStore.aircraft.find((item) => item.folderName === folderName)?.displayName ||
-      folderName,
-  }
-}
-
-async function handleEngineModApplied(result: EngineModApplyResult) {
-  engineModTarget.value = null
-  toastStore.success(
-    t('engineMod.applySuccess', {
-      acfCount: result.patchedAcfFiles.length,
-      fileCount: result.copiedFiles,
-    }),
-  )
-  await managementStore.loadAircraft()
-}
-
-async function handleInstallPatch(folderName: string) {
-  const selected = await openFileDialog({
-    multiple: false,
-    directory: false,
-    filters: [{ name: 'Archives', extensions: ['zip', '7z', 'rar'] }],
-  })
-  const archive = Array.isArray(selected) ? selected[0] : selected
-  if (!archive) return
-  patchStore.open(archive, folderName)
-  router.push('/')
-}
-
-function handleRestorePatch(folderName: string) {
-  patchBackupTarget.value = {
-    xplanePath: appStore.xplanePath,
-    folderName,
-    displayName:
-      managementStore.aircraft.find((item) => item.folderName === folderName)?.displayName ||
-      folderName,
-  }
-}
-
-async function handlePatchRestored(result: PatchRestoreResult) {
-  patchBackupTarget.value = null
-  const messages: string[] = []
-  if (result.restoredCount) {
-    messages.push(t('patch.restoreSuccess', { count: result.restoredCount }))
-  }
-  if (result.removedCount) {
-    messages.push(t('patch.restoreRemovedAdded', { count: result.removedCount }))
-  }
-  if (messages.length > 0) {
-    toastStore.success(messages.join(' · '))
-  }
-  if (result.backupCleanupError) {
-    toastStore.warning(result.backupCleanupError)
-  }
-  await managementStore.loadAircraft()
-}
 
 // Tab state
 const activeTab = ref<ManagementTab>('aircraft')
@@ -1272,9 +1193,6 @@ const isLoading = computed(() => {
                   @manage-acf-files="handleManageAcfFiles"
                   @view-liveries="handleViewLiveries"
                   @toggle-select="toggleSelect"
-                  @install-patch="handleInstallPatch"
-                  @install-engine-mod="handleInstallEngineMod"
-                  @restore-patch="handleRestorePatch"
                   @update="
                     (fn) =>
                       handleOpenUpdate(
@@ -1354,22 +1272,6 @@ const isLoading = computed(() => {
         </Transition>
       </div>
     </template>
-    <PatchBackupModal
-      v-if="patchBackupTarget"
-      :xplane-path="patchBackupTarget.xplanePath"
-      :aircraft-folder="patchBackupTarget.folderName"
-      :aircraft-name="patchBackupTarget.displayName"
-      @close="patchBackupTarget = null"
-      @restored="handlePatchRestored"
-    />
-    <EngineModModal
-      v-if="engineModTarget"
-      :xplane-path="engineModTarget.xplanePath"
-      :aircraft-folder="engineModTarget.folderName"
-      :aircraft-name="engineModTarget.displayName"
-      @close="engineModTarget = null"
-      @applied="handleEngineModApplied"
-    />
     <AircraftAcfManagerModal
       :aircraft="acfManagerAircraft"
       :busy-files="busyAcfFiles"

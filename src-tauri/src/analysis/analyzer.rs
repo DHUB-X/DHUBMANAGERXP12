@@ -974,7 +974,7 @@ impl Analyzer {
                             })
                             .unwrap_or(custom_data)
                     }
-                    AddonType::Livery | AddonType::LuaScript | AddonType::Patch => unreachable!(), // Already handled above
+                    AddonType::Livery | AddonType::LuaScript => unreachable!(), // Already handled above
                 };
 
                 // For Navdata, install directly into target_base (don't create subfolder)
@@ -1100,12 +1100,6 @@ impl Analyzer {
             companion_paths: item.companion_paths,
             scenery_options: item.scenery_options,
             selected_scenery_option: None,
-            patch_files: Vec::new(),
-            patch_plan_id: None,
-            patch_backup: false,
-            patch_backup_dir: None,
-            patch_aircraft_root: None,
-            patch_clean_fmod: false,
         }
     }
 
@@ -1499,12 +1493,6 @@ mod tests {
             companion_paths: Vec::new(),
             scenery_options: Vec::new(),
             selected_scenery_option: None,
-            patch_files: Vec::new(),
-            patch_plan_id: None,
-            patch_backup: false,
-            patch_backup_dir: None,
-            patch_aircraft_root: None,
-            patch_clean_fmod: false,
         }
     }
 

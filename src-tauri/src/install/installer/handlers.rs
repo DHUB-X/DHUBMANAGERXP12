@@ -662,20 +662,6 @@ impl Installer {
             anyhow::bail!("Invalid scenery installation option");
         }
 
-        // Patch tasks must always stage, validate and back up before writing,
-        // including when the general atomic-install preference is disabled.
-        if task.addon_type == AddonType::Patch {
-            if task.extraction_chain.is_some()
-                || !task.should_overwrite
-                || task.archive_internal_root.is_some()
-                || task.patch_files.is_empty()
-                || !Self::is_supported_archive_file(source)
-            {
-                return Err(anyhow::anyhow!("Invalid patch installation task"));
-            }
-            return self.install_task_atomic(task, source, target, ctx, password, xplane_path);
-        }
-
         if task.selected_scenery_option.is_some() {
             return self.install_task_atomic(task, source, target, ctx, password, xplane_path);
         }
@@ -2312,18 +2298,6 @@ impl Installer {
         if let Some(option) = task.scenery_option() {
             validate_scenery_option_root(task, source, option)?;
         }
-        let patch_root = if matches!(task.addon_type, AddonType::Patch) {
-            let root = task.patch_aircraft_root.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("Patch task is missing its selected aircraft boundary")
-            })?;
-            let root = Path::new(root);
-            if root != target || fs::canonicalize(root)? != root {
-                return Err(anyhow::anyhow!("The selected patch aircraft has moved"));
-            }
-            Some(root)
-        } else {
-            None
-        };
 
         // Use X-Plane root path directly from settings
         let xplane_root = Path::new(xplane_path);
@@ -2392,15 +2366,6 @@ impl Installer {
                 ctx,
                 password,
             )?;
-        }
-
-        if let Some(root) = patch_root {
-            return crate::patch::apply_staged_patch(
-                atomic.temp_dir(),
-                root,
-                task,
-                &self.task_control,
-            );
         }
 
         if let Some(option) = task.scenery_option().cloned() {

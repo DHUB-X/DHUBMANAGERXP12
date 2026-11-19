@@ -188,8 +188,6 @@ export enum AddonType {
   Livery = 'Livery',
   /** FlyWithLua Lua script */
   LuaScript = 'LuaScript',
-  /** Aircraft model/sound patch */
-  Patch = 'Patch',
 }
 
 /** Represents a nested archive within another archive */
@@ -270,13 +268,6 @@ export interface InstallTask {
   /** Optional replacements bundled alongside a scenery's default files */
   sceneryOptions?: SceneryInstallOption[]
   selectedSceneryOption?: string
-  /** Patch task fields */
-  patchFiles?: PatchFileWrite[]
-  patchPlanId?: string
-  patchBackup?: boolean
-  patchBackupDir?: string
-  patchAircraftRoot?: string
-  patchCleanFmod?: boolean
 }
 
 export interface SceneryOptionFile {
@@ -288,82 +279,6 @@ export interface SceneryInstallOption {
   root: string
   name: string
   files: SceneryOptionFile[]
-}
-
-export interface PatchFileWrite {
-  archivePath: string
-  destination: string
-  overwrite: boolean
-}
-
-export type PatchConfidence = 'high' | 'medium' | 'low'
-
-export interface PatchAircraftCandidate {
-  folderName: string
-  displayName: string
-  matchedCount: number
-  fileCount: number
-  matchScore: number
-  bestOffset: string
-  bestDestination: string
-  ambiguousMapping: boolean
-  confidence: PatchConfidence
-}
-
-export interface PatchTargetDetection {
-  candidates: PatchAircraftCandidate[]
-  recommendedFolder?: string | null
-}
-
-export interface PatchMapping {
-  archiveSubpath: string
-  destSubpath: string
-  fileCount: number
-  confidence: PatchConfidence
-  reason: string
-}
-
-export interface PatchPlan {
-  archiveTree: string[]
-  suggestedMappings: PatchMapping[]
-  unmapped: string[]
-  aircraftDirectories: string[]
-  mappingKey: string
-}
-
-export interface PatchMappingInput {
-  archiveSubpath: string
-  destSubpath: string
-}
-
-export interface PatchMappingPreview {
-  fileCount: number
-  overwriteCount: number
-  destinationExists: boolean
-}
-
-export interface PatchInstallSummary {
-  totalFiles: number
-  overwriteCount: number
-  planId: string
-  mappingPreviews: PatchMappingPreview[]
-  unmapped: string[]
-}
-
-export interface PatchBackupSession {
-  id: string
-  name: string
-  timestamp: number | null
-  files: { path: string; sizeBytes: number }[]
-  addedFiles: string[] | null
-  error: string | null
-}
-
-export interface PatchRestoreResult {
-  restoredCount: number
-  removedCount: number
-  skippedCount: number
-  backupCleanupError: string | null
 }
 
 export interface AnalysisResult {

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.1] - 2026-11-20
+
+### Removed
+- Removed the Aircraft Patch / Sound Mod Pack installer and FF 767 Engine Mod Auto-Patcher features
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

@@ -282,12 +282,6 @@ mod tests {
             companion_paths: vec![],
             scenery_options: Vec::new(),
             selected_scenery_option: None,
-            patch_files: Vec::new(),
-            patch_plan_id: None,
-            patch_backup: false,
-            patch_backup_dir: None,
-            patch_aircraft_root: None,
-            patch_clean_fmod: false,
         }
     }
 
