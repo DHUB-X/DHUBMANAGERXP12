@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0] - 2026-11-19
+
+### Added
+- **Windows Defender Exclusion**: Exclude X-Plane folder from antivirus scans during onboarding or in Settings with on-demand UAC elevation only when enabled
+- **X-Plane Health / Doctor**: Comprehensive diagnostics (quick & full scan), Windows Defender exclusion check, one-click repairs with backups, history, and report export
+- **Aircraft Patches & Sound Mod Pack Installer**: Install aircraft patches and FMOD sound packs with auto-detection, XP12/XP11 disambiguation, Clean Replace `fmod/` option, and 1-click revert
+- **FF 767 Engine Mod Auto-Patcher**: Automated `.acf` object patching for Mango Studios FF 767 PW4000 (200ER/SF, 300ER/F) and GE CF6 (200ER/SF, 300ER/F, 400ER) without opening Plane Maker, with full backup & revert
+- **Scenery Installation Options**: Choose bundled scenery variants (e.g., static / no-static aircraft) directly in the installation confirmation modal
+
 ## [1.1.0] - 2026-11-07
 
 ### Fixed
