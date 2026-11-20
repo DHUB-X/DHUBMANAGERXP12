@@ -1986,14 +1986,19 @@ fn ensure_http_or_https(url: &str) -> Result<()> {
     }
 }
 
-async fn fetch_text_optional(client: &reqwest::Client, url: &str) -> Result<Option<String>> {
+async fn fetch_text_with_options(
+    client: &reqwest::Client,
+    url: &str,
+    treat_403_as_missing: bool,
+) -> Result<Option<String>> {
     let response = client
         .get(url)
         .send()
         .await
         .with_context(|| format!("Failed to request '{}'", url))?;
 
-    if response.status().as_u16() == 404 {
+    let status_code = response.status().as_u16();
+    if status_code == 404 || (treat_403_as_missing && status_code == 403) {
         return Ok(None);
     }
 
@@ -2012,8 +2017,13 @@ async fn fetch_text_optional(client: &reqwest::Client, url: &str) -> Result<Opti
     Ok(Some(text))
 }
 
+async fn fetch_text_optional(client: &reqwest::Client, url: &str) -> Result<Option<String>> {
+    // S3/CloudFront buckets without s3:ListBucket return 403 AccessDenied for absent optional files.
+    fetch_text_with_options(client, url, true).await
+}
+
 async fn fetch_text_required(client: &reqwest::Client, url: &str) -> Result<String> {
-    fetch_text_optional(client, url)
+    fetch_text_with_options(client, url, false)
         .await?
         .ok_or_else(|| anyhow!("Required remote file '{}' was not found", url))
 }

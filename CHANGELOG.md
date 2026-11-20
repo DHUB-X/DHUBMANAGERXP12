@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.3] - 2026-11-20
+
+### Fixed
+- Treat HTTP 403 on optional SkunkCrafts manifest files (`ignorelist`, `oncelist`, `sizeslist`, `blacklist`) as missing, fixing S3/CloudFront `AccessDenied` errors on servers without `ListBucket`
+
 ## [1.2.2] - 2026-11-20
 
 ### Fixed
